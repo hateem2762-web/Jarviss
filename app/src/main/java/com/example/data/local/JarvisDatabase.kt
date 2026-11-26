@@ -52,6 +52,21 @@ data class TapCoordinateEntity(
     val createdAtMillis: Long = System.currentTimeMillis(),
 )
 
+@Entity(tableName = "proactive_alerts")
+data class ProactiveAlertEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val sourcePackage: String,
+    val senderName: String,
+    val originalMessage: String,
+    val summary: String,
+    val importanceScore: Int,
+    val importanceReason: String,
+    val draftReply: String,
+    val messageTimestampMillis: Long,
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val isDismissed: Boolean = false,
+)
+
 @Dao
 interface JarvisDao {
     @Query("SELECT * FROM chat_messages ORDER BY timestampMillis ASC, id ASC")
@@ -97,11 +112,34 @@ interface JarvisDao {
 
     @Query("DELETE FROM tap_coordinates WHERE profilePackageName = :packageName AND LOWER(label) = LOWER(:label)")
     suspend fun deleteDuplicateCoordinateLabel(packageName: String, label: String)
+
+    @Query("SELECT * FROM proactive_alerts WHERE isDismissed = 0 ORDER BY createdAtMillis DESC")
+    fun observeActiveProactiveAlerts(): Flow<List<ProactiveAlertEntity>>
+
+    @Query("SELECT * FROM proactive_alerts WHERE id = :id LIMIT 1")
+    suspend fun getProactiveAlertById(id: Long): ProactiveAlertEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertProactiveAlert(entity: ProactiveAlertEntity): Long
+
+    @Query("UPDATE proactive_alerts SET draftReply = :draft WHERE id = :id")
+    suspend fun updateProactiveDraft(id: Long, draft: String)
+
+    @Query("UPDATE proactive_alerts SET isDismissed = 1 WHERE id = :id")
+    suspend fun dismissProactiveAlert(id: Long)
+
+    @Query("UPDATE proactive_alerts SET isDismissed = 1")
+    suspend fun dismissAllProactiveAlerts()
 }
 
 @Database(
-    entities = [ChatMessageEntity::class, ReminderEntity::class, TapCoordinateEntity::class],
-    version = 3,
+    entities = [
+        ChatMessageEntity::class,
+        ReminderEntity::class,
+        TapCoordinateEntity::class,
+        ProactiveAlertEntity::class,
+    ],
+    version = 4,
     exportSchema = false,
 )
 abstract class JarvisDatabase : RoomDatabase() {

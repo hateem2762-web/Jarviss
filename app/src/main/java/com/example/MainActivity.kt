@@ -65,6 +65,8 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.accessibility.JarvisAccessibilityService
 import com.example.ai.configureAppCheck
 import com.example.model.JarvisDestination
+import com.example.notifications.JarvisNotificationListenerService
+import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
 import com.example.overlay.OverlayLaunchActivity
 import com.example.ui.JarvisViewModel
@@ -76,11 +78,17 @@ import com.example.ui.theme.JarvisTheme
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var openAssistantTabSignal by mutableStateOf(0)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         // STEP 1: Configure App Check with launch intent before any UI, ViewModels, or Firebase operations
         configureAppCheck(this, intent)
+
+        if (intent?.getLongExtra(ProactiveAlertNotifier.EXTRA_PROACTIVE_ALERT_ID, -1L) ?: -1L > 0L) {
+            openAssistantTabSignal++
+        }
 
         enableEdgeToEdge()
         setContent {
@@ -88,8 +96,17 @@ class MainActivity : ComponentActivity() {
                 launchedForOverlayPermission = intent?.getBooleanExtra(
                     OverlayLaunchActivity.EXTRA_NEEDS_OVERLAY_PERMISSION,
                     false
-                ) == true
+                ) == true,
+                openAssistantTabSignal = openAssistantTabSignal,
             )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.getLongExtra(ProactiveAlertNotifier.EXTRA_PROACTIVE_ALERT_ID, -1L) > 0L) {
+            openAssistantTabSignal++
         }
     }
 }
@@ -97,6 +114,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun JarvisApp(
     launchedForOverlayPermission: Boolean = false,
+    openAssistantTabSignal: Int = 0,
     viewModel: JarvisViewModel = viewModel(),
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -111,6 +129,9 @@ fun JarvisApp(
     var hasOverlayPermission by remember { mutableStateOf(Settings.canDrawOverlays(context)) }
     var hasAccessibilityPermission by remember {
         mutableStateOf(JarvisAccessibilityService.isAccessibilityEnabled(context))
+    }
+    var hasNotificationListenerPermission by remember {
+        mutableStateOf(JarvisNotificationListenerService.isNotificationListenerEnabled(context))
     }
     var hasMicPermission by remember {
         mutableStateOf(
@@ -130,12 +151,20 @@ fun JarvisApp(
         )
     }
 
+    LaunchedEffect(openAssistantTabSignal) {
+        if (openAssistantTabSignal > 0) {
+            currentDestination = JarvisDestination.ASSISTANT
+        }
+    }
+
     // Refresh permission states whenever returning from Android Settings
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 hasOverlayPermission = Settings.canDrawOverlays(context)
                 hasAccessibilityPermission = JarvisAccessibilityService.isAccessibilityEnabled(context)
+                hasNotificationListenerPermission =
+                    JarvisNotificationListenerService.isNotificationListenerEnabled(context)
                 hasMicPermission = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO
@@ -240,6 +269,10 @@ fun JarvisApp(
         JarvisAccessibilityService.openAccessibilitySettings(context)
     }
 
+    val openNotificationListenerSettings = {
+        JarvisNotificationListenerService.openNotificationListenerSettings(context)
+    }
+
     LaunchedEffect(launchedForOverlayPermission) {
         if (launchedForOverlayPermission && !Settings.canDrawOverlays(context)) {
             snackbarHostState.showSnackbar(context.getString(R.string.overlay_permission_needed))
@@ -274,11 +307,12 @@ fun JarvisApp(
         }
     }
 
-    // Request notification permission on Android 13+ only when background/reminder features require it
+    // Request notification permission on Android 13+ when background, proactive alerts, or reminders require it
     val needsServiceOrReminders = uiState.reminders.isNotEmpty() ||
         uiState.preferences.persistentTriggerEnabled ||
         uiState.preferences.floatingBubbleEnabled ||
-        uiState.preferences.wakeWordEnabled
+        uiState.preferences.wakeWordEnabled ||
+        (uiState.preferences.proactiveAlertsEnabled && hasNotificationListenerPermission)
 
     LaunchedEffect(needsServiceOrReminders, hasNotificationPermission) {
         if (!needsServiceOrReminders) return@LaunchedEffect
@@ -354,14 +388,21 @@ fun JarvisApp(
                                 hasOverlayPermission = hasOverlayPermission,
                                 hasMicPermission = hasMicPermission,
                                 hasAccessibilityPermission = hasAccessibilityPermission,
+                                hasNotificationListenerPermission = hasNotificationListenerPermission,
                                 onRequestOverlayPermission = requestOverlayPermission,
                                 onRequestMicPermission = {
                                     micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 },
                                 onOpenAccessibilitySettings = openAccessibilitySettings,
+                                onOpenNotificationListenerSettings = openNotificationListenerSettings,
                                 onLaunchOverlay = launchOverlay,
                                 onToggleWakeWord = toggleWakeWord,
                                 onDisableAllOverlays = viewModel::disableAllOverlayModes,
+                                onUpdateProactiveDraft = viewModel::updateProactiveAlertDraft,
+                                onCopyProactiveDraft = viewModel::copyProactiveDraft,
+                                onOpenProactiveWhatsApp = viewModel::openWhatsAppForAlert,
+                                onSendProactiveDirectReply = viewModel::sendProactiveDirectReply,
+                                onDismissProactiveAlert = viewModel::dismissProactiveAlert,
                                 onSendCommand = viewModel::sendCommand,
                                 onRetry = viewModel::retryLastCommand,
                                 onRunAction = viewModel::executeActionForMessage,
@@ -395,11 +436,13 @@ fun JarvisApp(
                                 hasOverlayPermission = hasOverlayPermission,
                                 hasMicPermission = hasMicPermission,
                                 hasAccessibilityPermission = hasAccessibilityPermission,
+                                hasNotificationListenerPermission = hasNotificationListenerPermission,
                                 onRequestOverlayPermission = requestOverlayPermission,
                                 onRequestMicPermission = {
                                     micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
                                 },
                                 onOpenAccessibilitySettings = openAccessibilitySettings,
+                                onOpenNotificationListenerSettings = openNotificationListenerSettings,
                                 onLaunchOverlay = launchOverlay,
                                 onStartCrosshair = launchCrosshair,
                                 onSaveUserContext = viewModel::updateUserContext,
@@ -409,6 +452,8 @@ fun JarvisApp(
                                 onTogglePersistentTrigger = viewModel::setPersistentTriggerEnabled,
                                 onToggleFloatingBubble = toggleFloatingBubble,
                                 onToggleWakeWord = toggleWakeWord,
+                                onToggleProactiveAlerts = viewModel::setProactiveAlertsEnabled,
+                                onChangeImportanceThreshold = viewModel::setImportanceThreshold,
                                 onDisableAllOverlays = viewModel::disableAllOverlayModes,
                                 onClearHistory = viewModel::clearHistory,
                             )

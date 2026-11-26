@@ -32,6 +32,13 @@ data class JarvisAiReply(
     val action: JarvisAction?,
 )
 
+data class WhatsAppEvaluation(
+    val importanceScore: Int,
+    val importanceReason: String,
+    val summary: String,
+    val draftReply: String,
+)
+
 class JarvisRepository {
 
     private val jarvisSchema = Schema.obj(
@@ -93,6 +100,36 @@ class JarvisRepository {
         Firebase.ai.generativeModel(
             modelName = FALLBACK_MODEL,
             generationConfig = schemaGenerationConfig,
+        )
+    }
+
+    private val whatsAppEvaluationSchema = Schema.obj(
+        properties = mapOf(
+            "importanceScore" to Schema.integer(
+                description = "1 (önemsiz sohbet/selamlaşma) ile 10 (çok acil/kritik iş, para, sağlık, toplantı, doğrudan önemli soru) arasında önem puanı."
+            ),
+            "importanceReason" to Schema.string(
+                description = "Mesajın neden bu önem puanını aldığını açıklayan tek satırlık kısa Türkçe gerekçe."
+            ),
+            "summary" to Schema.string(
+                description = "Mesajın kullanıcıya bildirilecek çok kısa 1 cümlelik Türkçe özeti."
+            ),
+            "draftReply" to Schema.string(
+                description = "Kullanıcı adına gönderilmeye hazır, doğal, net ve kısa Türkçe WhatsApp cevap taslağı."
+            ),
+        )
+    )
+
+    private val whatsAppEvalConfig = generationConfig {
+        responseMimeType = "application/json"
+        responseSchema = whatsAppEvaluationSchema
+        temperature = 0.2f
+    }
+
+    private val whatsAppEvalModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = PRIMARY_MODEL,
+            generationConfig = whatsAppEvalConfig,
         )
     }
 
@@ -315,6 +352,71 @@ class JarvisRepository {
             - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home veya tap_coordinate niyeti varsa mode="action", reply alanına tek satır onay yaz.
             - MOD 2 (mode="answer"): Bilgi sorusu, özet, metin üretimi veya sohbetse mode="answer", intent="none" seç.
         """.trimIndent()
+    }
+
+    suspend fun evaluateWhatsAppMessage(
+        senderName: String,
+        messageText: String,
+        userContext: String,
+    ): Result<WhatsAppEvaluation> = withContext(Dispatchers.IO) {
+        val contextHint = userContext.trim().ifBlank {
+            "Kısa, net, kibar ve doğal Türkçe yanıt ver."
+        }
+        val prompt = """
+            Sen kullanıcının proaktif WhatsApp asistanısın (JARVIS).
+            Gelen bir WhatsApp mesajını analiz edip önem derecesini puanla ve kullanıcı için hazır cevap taslağı oluştur.
+
+            PUANLAMA REHBERİ:
+            - 1-3: Gündelik selamlaşma, muhabbet, tek yönlü önemsiz bilgi, şaka, teşekkür.
+            - 4-6: Normal planlama, aciliyeti olmayan soru veya sıradan hatırlatma.
+            - 7-8: Önemli soru, randevu/toplantı değişikliği, iş/aile ile ilgili net aksiyon gerektiren mesaj.
+            - 9-10: Acil durum, son dakika iptali, ödeme/finans/onay kodu, kritik iş veya sağlık konusu.
+
+            KULLANICI BAĞLAMI: $contextHint
+            GÖNDEREN: $senderName
+            MESAJ: $messageText
+        """.trimIndent()
+
+        try {
+            val accumulated = StringBuilder()
+            withTimeout(ATTEMPT_TIMEOUT_MS) {
+                whatsAppEvalModel.generateContentStream(
+                    content {
+                        text(prompt)
+                    }
+                ).collect { chunk ->
+                    val chunkText = chunk.text.orEmpty()
+                    if (chunkText.isNotEmpty()) {
+                        accumulated.append(chunkText)
+                    }
+                }
+            }
+            val raw = accumulated.toString().trim()
+            if (raw.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("Boş değerlendirme yanıtı."))
+            }
+            val json = JSONObject(raw)
+            val score = json.optInt("importanceScore", 1).coerceIn(1, 10)
+            val reason = json.optString("importanceReason", "").trim()
+                .ifBlank { "Mesaj içeriği dikkat gerektiriyor." }
+            val summary = json.optString("summary", "").trim()
+                .ifBlank { messageText.take(100) }
+            val draft = json.optString("draftReply", "").trim()
+                .ifBlank { "Mesajını aldım, birazdan dönüş yapacağım." }
+            Result.success(
+                WhatsAppEvaluation(
+                    importanceScore = score,
+                    importanceReason = reason,
+                    summary = summary,
+                    draftReply = draft,
+                )
+            )
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "evaluateWhatsAppMessage failed", e)
+            Result.failure(Exception(formatAiError(e)))
+        }
     }
 
     private fun buildRecentHistoryBlock(messages: List<JarvisMessage>): String {

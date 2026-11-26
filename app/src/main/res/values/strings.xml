@@ -41,4 +41,8 @@
     <string name="record_point">Nokta Kaydet</string>
     <string name="accessibility_service_label">JARVIS Dokunma Asistanı</string>
     <string name="accessibility_service_description">Kayıtlı koordinatlara sesli veya yazılı komutlarla dokunur ve aktif oyun/uygulamayı algılar.</string>
+    <string name="notification_listener_label">JARVIS Proaktif WhatsApp Asistanı</string>
+    <string name="proactive_channel_name">JARVIS Önemli WhatsApp Uyarıları</string>
+    <string name="proactive_channel_desc">Önem eşiğini aşan WhatsApp mesajları için özet, gerekçe ve hazır cevap taslağı bildirimleri</string>
+    <string name="notification_listener_needed">Gelen WhatsApp mesajlarını analiz etmek için Bildirim Erişimi izni gerekli.</string>
 </resources>

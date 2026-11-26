@@ -41,6 +41,7 @@ import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.PowerSettingsNew
@@ -85,9 +86,12 @@ import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.ProactiveAlertItem
+import com.example.notifications.ProactiveAlertActionCache
 import com.example.ui.JarvisUiState
 import com.example.ui.components.ActionDispatchCard
 import com.example.ui.components.JarvisTopHudBar
+import com.example.ui.components.ProactiveAlertCard
 import com.example.ui.components.VoiceOrbButton
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCyan
@@ -113,12 +117,19 @@ fun AssistantScreen(
     hasOverlayPermission: Boolean,
     hasMicPermission: Boolean,
     hasAccessibilityPermission: Boolean,
+    hasNotificationListenerPermission: Boolean,
     onRequestOverlayPermission: () -> Unit,
     onRequestMicPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenNotificationListenerSettings: () -> Unit,
     onLaunchOverlay: () -> Unit,
     onToggleWakeWord: (Boolean) -> Unit,
     onDisableAllOverlays: () -> Unit,
+    onUpdateProactiveDraft: (Long, String) -> Unit,
+    onCopyProactiveDraft: (String) -> Unit,
+    onOpenProactiveWhatsApp: (ProactiveAlertItem, String) -> Unit,
+    onSendProactiveDirectReply: (ProactiveAlertItem, String) -> Unit,
+    onDismissProactiveAlert: (Long) -> Unit,
     onSendCommand: (String) -> Unit,
     onRetry: () -> Unit,
     onRunAction: (Long, JarvisAction) -> Unit,
@@ -169,15 +180,20 @@ fun AssistantScreen(
             onClearChat = onClearChat,
         )
 
-        // Overlay, Mic & Accessibility Permission Setup Banner or Quick Overlay Launch Bar
-        if (!hasOverlayPermission || !hasMicPermission || !hasAccessibilityPermission) {
+        val needsNotifListenerSetup = uiState.preferences.proactiveAlertsEnabled &&
+            !hasNotificationListenerPermission
+
+        // Overlay, Mic, Accessibility & Notification Listener Permission Setup Banner
+        if (!hasOverlayPermission || !hasMicPermission || !hasAccessibilityPermission || needsNotifListenerSetup) {
             PermissionOnboardingCard(
                 hasOverlayPermission = hasOverlayPermission,
                 hasMicPermission = hasMicPermission,
                 hasAccessibilityPermission = hasAccessibilityPermission,
+                showNotificationListenerButton = needsNotifListenerSetup,
                 onRequestOverlayPermission = onRequestOverlayPermission,
                 onRequestMicPermission = onRequestMicPermission,
                 onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
                 modifier = Modifier
                     .widthIn(max = 720.dp)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
@@ -276,7 +292,7 @@ fun AssistantScreen(
                 .fillMaxWidth(),
             contentAlignment = Alignment.TopCenter,
         ) {
-            if (uiState.messages.isEmpty()) {
+            if (uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty()) {
                 EmptyAssistantHud(
                     onQuickCommand = onSendCommand,
                     modifier = Modifier
@@ -292,14 +308,35 @@ fun AssistantScreen(
                     contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    items(uiState.messages, key = { it.id }) { msg ->
-                        MessageBubble(
-                            message = msg,
-                            isSpeaking = uiState.speakingMessageId == msg.id,
-                            onRunAction = { action -> onRunAction(msg.id, action) },
-                            onCopy = { onCopyMessage(msg.text) },
-                            onToggleSpeak = { onToggleSpeakMessage(msg) },
+                    items(uiState.proactiveAlerts, key = { "proactive_${it.id}" }) { alert ->
+                        ProactiveAlertCard(
+                            alert = alert,
+                            hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
+                            onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
+                            onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
+                            onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
+                            onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
+                            onDismiss = { onDismissProactiveAlert(alert.id) },
                         )
+                    }
+
+                    if (uiState.messages.isEmpty()) {
+                        item(key = "empty_hud_inline") {
+                            EmptyAssistantHud(
+                                onQuickCommand = onSendCommand,
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                    } else {
+                        items(uiState.messages, key = { it.id }) { msg ->
+                            MessageBubble(
+                                message = msg,
+                                isSpeaking = uiState.speakingMessageId == msg.id,
+                                onRunAction = { action -> onRunAction(msg.id, action) },
+                                onCopy = { onCopyMessage(msg.text) },
+                                onToggleSpeak = { onToggleSpeakMessage(msg) },
+                            )
+                        }
                     }
 
                     if (uiState.voiceState.isListening) {
@@ -396,9 +433,11 @@ private fun PermissionOnboardingCard(
     hasOverlayPermission: Boolean,
     hasMicPermission: Boolean,
     hasAccessibilityPermission: Boolean,
+    showNotificationListenerButton: Boolean,
     onRequestOverlayPermission: () -> Unit,
     onRequestMicPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenNotificationListenerSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Surface(
@@ -412,7 +451,7 @@ private fun PermissionOnboardingCard(
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "Tam erişim ve ekrana dokunma için eksik izinler:",
+                text = "Tam erişim, dokunma ve WhatsApp takibi için eksik izinler:",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -469,6 +508,23 @@ private fun PermissionOnboardingCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text("Erişilebilirlik Aç", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+                if (showNotificationListenerButton) {
+                    OutlinedButton(
+                        onClick = onOpenNotificationListenerSettings,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("grant_notification_listener_button"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.NotificationsActive,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Bildirim Erişimi Aç", style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }

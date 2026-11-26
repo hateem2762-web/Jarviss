@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Tune
@@ -37,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -72,9 +74,11 @@ fun SettingsScreen(
     hasOverlayPermission: Boolean,
     hasMicPermission: Boolean,
     hasAccessibilityPermission: Boolean,
+    hasNotificationListenerPermission: Boolean,
     onRequestOverlayPermission: () -> Unit,
     onRequestMicPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
+    onOpenNotificationListenerSettings: () -> Unit,
     onLaunchOverlay: () -> Unit,
     onStartCrosshair: () -> Unit,
     onSaveUserContext: (String) -> Unit,
@@ -84,6 +88,8 @@ fun SettingsScreen(
     onTogglePersistentTrigger: (Boolean) -> Unit,
     onToggleFloatingBubble: (Boolean) -> Unit,
     onToggleWakeWord: (Boolean) -> Unit,
+    onToggleProactiveAlerts: (Boolean) -> Unit,
+    onChangeImportanceThreshold: (Int) -> Unit,
     onDisableAllOverlays: () -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier,
@@ -312,6 +318,103 @@ fun SettingsScreen(
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Nokta Kaydet", style = MaterialTheme.typography.labelMedium)
                         }
+                    }
+                }
+            }
+
+            // Proactive WhatsApp Assistant Card
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                tonalElevation = 1.dp,
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "Proaktif WhatsApp Asistanı",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        text = "Siz komut vermeden gelen WhatsApp bildirimlerini önem sırasına göre süzer; eşik üstü mesajlar için özel bildirim ve hazır cevap taslağı üretir.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    OutlinedButton(
+                        onClick = onOpenNotificationListenerSettings,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("settings_notification_listener_button"),
+                        shape = RoundedCornerShape(12.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.NotificationsActive,
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (hasNotificationListenerPermission) {
+                                "Bildirim Erişimi (WhatsApp Takibi): Açık"
+                            } else {
+                                "Bildirim Erişimini Aç (WhatsApp İçin)"
+                            }
+                        )
+                    }
+
+                    SettingToggleRow(
+                        title = "Proaktif bildirim açık/kapalı",
+                        subtitle = "Önemli WhatsApp mesajlarını otomatik analiz edip bildirim ve taslak hazırlar",
+                        checked = uiState.preferences.proactiveAlertsEnabled,
+                        onCheckedChange = onToggleProactiveAlerts,
+                        testTag = "toggle_proactive_alerts",
+                    )
+
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Önem Eşiği",
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Surface(
+                                shape = RoundedCornerShape(8.dp),
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                            ) {
+                                Text(
+                                    text = "${uiState.preferences.importanceThreshold} / 10",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
+                        Text(
+                            text = "Sadece ${uiState.preferences.importanceThreshold} ve üzeri önem puanı alan mesajlar bildirilir (kısa/anlamsız mesajlar API'ye gönderilmeden elenir).",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Slider(
+                            value = uiState.preferences.importanceThreshold.toFloat(),
+                            onValueChange = { raw ->
+                                onChangeImportanceThreshold(kotlin.math.round(raw).toInt().coerceIn(1, 10))
+                            },
+                            valueRange = 1f..10f,
+                            steps = 8,
+                            enabled = uiState.preferences.proactiveAlertsEnabled,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("importance_threshold_slider"),
+                        )
                     }
                 }
             }

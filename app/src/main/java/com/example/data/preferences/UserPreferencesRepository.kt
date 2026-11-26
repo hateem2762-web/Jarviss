@@ -5,6 +5,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
@@ -22,6 +23,8 @@ data class JarvisPreferences(
     val persistentTriggerEnabled: Boolean = false,
     val floatingBubbleEnabled: Boolean = false,
     val wakeWordEnabled: Boolean = false,
+    val proactiveAlertsEnabled: Boolean = true,
+    val importanceThreshold: Int = 7,
     val manualProfilePackageName: String = "",
     val manualProfileName: String = "",
 )
@@ -36,6 +39,8 @@ class UserPreferencesRepository(private val context: Context) {
         val PERSISTENT_TRIGGER = booleanPreferencesKey("persistent_trigger")
         val FLOATING_BUBBLE = booleanPreferencesKey("floating_bubble")
         val WAKE_WORD = booleanPreferencesKey("wake_word_enabled")
+        val PROACTIVE_ALERTS = booleanPreferencesKey("proactive_alerts_enabled")
+        val IMPORTANCE_THRESHOLD = intPreferencesKey("importance_threshold")
         val MANUAL_PROFILE_PKG = stringPreferencesKey("manual_profile_pkg")
         val MANUAL_PROFILE_NAME = stringPreferencesKey("manual_profile_name")
     }
@@ -49,6 +54,8 @@ class UserPreferencesRepository(private val context: Context) {
             persistentTriggerEnabled = prefs[Keys.PERSISTENT_TRIGGER] ?: false,
             floatingBubbleEnabled = prefs[Keys.FLOATING_BUBBLE] ?: false,
             wakeWordEnabled = prefs[Keys.WAKE_WORD] ?: false,
+            proactiveAlertsEnabled = prefs[Keys.PROACTIVE_ALERTS] ?: true,
+            importanceThreshold = (prefs[Keys.IMPORTANCE_THRESHOLD] ?: 7).coerceIn(1, 10),
             manualProfilePackageName = prefs[Keys.MANUAL_PROFILE_PKG] ?: "",
             manualProfileName = prefs[Keys.MANUAL_PROFILE_NAME] ?: "",
         )
@@ -101,6 +108,18 @@ class UserPreferencesRepository(private val context: Context) {
             prefs[Keys.FLOATING_BUBBLE] = false
             prefs[Keys.PERSISTENT_TRIGGER] = false
             prefs[Keys.WAKE_WORD] = false
+        }
+    }
+
+    suspend fun setProactiveAlertsEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.PROACTIVE_ALERTS] = enabled
+        }
+    }
+
+    suspend fun setImportanceThreshold(threshold: Int) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.IMPORTANCE_THRESHOLD] = threshold.coerceIn(1, 10)
         }
     }
 

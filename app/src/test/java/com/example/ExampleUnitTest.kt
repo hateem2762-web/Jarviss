@@ -5,6 +5,7 @@ import com.example.model.JarvisAction
 import com.example.model.TapCoordinateItem
 import com.example.system.CoordinateMatcher
 import com.example.system.WakeWordManager
+import com.example.system.WhatsAppMessageFilter
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -113,5 +114,29 @@ class ExampleUnitTest {
         assertNull(WakeWordManager.extractTrailingCommand("Jarvis"))
         assertEquals("YouTube aç", WakeWordManager.extractTrailingCommand("Jarvis YouTube aç"))
         assertEquals("hava nasıl", WakeWordManager.extractTrailingCommand("Hey carvis, hava nasıl?"))
+    }
+
+    @Test
+    fun whatsapp_message_filter_rejects_chatter_and_allows_important_messages() {
+        assertTrue(WhatsAppMessageFilter.isWhatsAppPackage("com.whatsapp"))
+        assertTrue(WhatsAppMessageFilter.isWhatsAppPackage("com.whatsapp.w4b"))
+        assertFalse(WhatsAppMessageFilter.isWhatsAppPackage("com.instagram.android"))
+
+        // Noise / chatter pre-filtered with zero API calls
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("Ahmet", "tamam"))
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("Ahmet", "hahaha"))
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("Ahmet", "👍👌"))
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("WhatsApp", "5 yeni mesaj"))
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("Ayşe", "2 sohbetten 4 mesaj"))
+        assertFalse(WhatsAppMessageFilter.shouldAnalyzeWithAi("Mehmet", "Bu mesaj silindi."))
+
+        // Important or urgent messages allowed through to Gemini
+        assertTrue(WhatsAppMessageFilter.shouldAnalyzeWithAi("Ahmet", "Acil!"))
+        assertTrue(
+            WhatsAppMessageFilter.shouldAnalyzeWithAi(
+                "Müdür",
+                "Yarınki saat 10:00 toplantısı 14:30'a alındı, sunumu güncelleyebilir misin?"
+            )
+        )
     }
 }

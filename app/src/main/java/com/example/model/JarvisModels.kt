@@ -124,3 +124,17 @@ data class TapCoordinateItem(
     val yPx: Int,
     val createdAtMillis: Long,
 )
+
+data class ProactiveAlertItem(
+    val id: Long,
+    val sourcePackage: String,
+    val senderName: String,
+    val originalMessage: String,
+    val summary: String,
+    val importanceScore: Int,
+    val importanceReason: String,
+    val draftReply: String,
+    val messageTimestampMillis: Long,
+    val createdAtMillis: Long,
+    val isDismissed: Boolean = false,
+)

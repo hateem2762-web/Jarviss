@@ -13,6 +13,7 @@ import com.example.ai.JarvisRepository
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
+import com.example.data.local.ProactiveAlertEntity
 import com.example.data.local.ReminderEntity
 import com.example.data.local.TapCoordinateEntity
 import com.example.data.local.toDomain
@@ -23,8 +24,11 @@ import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.ProactiveAlertItem
 import com.example.model.ReminderItem
 import com.example.model.TapCoordinateItem
+import com.example.notifications.ProactiveAlertActionCache
+import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
@@ -47,6 +51,7 @@ data class JarvisUiState(
     val messages: List<JarvisMessage> = emptyList(),
     val reminders: List<ReminderItem> = emptyList(),
     val coordinates: List<TapCoordinateItem> = emptyList(),
+    val proactiveAlerts: List<ProactiveAlertItem> = emptyList(),
     val preferences: JarvisPreferences = JarvisPreferences(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
     val voiceState: VoiceInputState = VoiceInputState(),
@@ -83,6 +88,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val messages: List<ChatMessageEntity>,
         val reminders: List<ReminderEntity>,
         val coordinates: List<TapCoordinateEntity>,
+        val proactiveAlerts: List<ProactiveAlertEntity>,
         val preferences: JarvisPreferences,
     )
 
@@ -105,12 +111,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         dao.observeMessages(),
         dao.observeReminders(),
         dao.observeCoordinates(),
+        dao.observeActiveProactiveAlerts(),
         prefsRepo.preferences,
-    ) { msgEntities, remEntities, coordEntities, prefs ->
+    ) { msgEntities, remEntities, coordEntities, alertEntities, prefs ->
         PersistentSnapshot(
             messages = msgEntities,
             reminders = remEntities,
             coordinates = coordEntities,
+            proactiveAlerts = alertEntities,
             preferences = prefs,
         )
     }
@@ -177,6 +185,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 )
             },
             coordinates = persistent.coordinates.map { it.toDomain() },
+            proactiveAlerts = persistent.proactiveAlerts.map { it.toProactiveDomain() },
             preferences = persistent.preferences,
             installedApps = runtime.apps,
             voiceState = runtime.voice,
@@ -599,6 +608,78 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun setProactiveAlertsEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setProactiveAlertsEnabled(enabled)
+            toastFlow.value = if (enabled) {
+                "Proaktif WhatsApp takibi açıldı."
+            } else {
+                "Proaktif WhatsApp takibi kapatıldı."
+            }
+        }
+    }
+
+    fun setImportanceThreshold(threshold: Int) {
+        viewModelScope.launch {
+            prefsRepo.setImportanceThreshold(threshold)
+        }
+    }
+
+    fun updateProactiveAlertDraft(alertId: Long, draft: String) {
+        viewModelScope.launch {
+            dao.updateProactiveDraft(alertId, draft)
+        }
+    }
+
+    fun copyProactiveDraft(draft: String) {
+        ProactiveAlertActionCache.copyToClipboard(getApplication(), draft)
+        toastFlow.value = "Cevap taslağı panoya kopyalandı."
+    }
+
+    fun openWhatsAppForAlert(alert: ProactiveAlertItem, draft: String) {
+        viewModelScope.launch {
+            dao.updateProactiveDraft(alert.id, draft)
+            val opened = ProactiveAlertActionCache.openWhatsAppChat(
+                context = getApplication(),
+                alertId = alert.id,
+                sourcePackage = alert.sourcePackage,
+                draftToCopy = draft,
+            )
+            ProactiveAlertNotifier.cancelAlertNotification(getApplication(), alert.id)
+            toastFlow.value = if (opened) {
+                "Taslak panoya kopyalandı, WhatsApp açılıyor."
+            } else {
+                "Cihazda WhatsApp bulunamadı."
+            }
+        }
+    }
+
+    fun sendProactiveDirectReply(alert: ProactiveAlertItem, draft: String) {
+        viewModelScope.launch {
+            val sent = ProactiveAlertActionCache.sendDirectReply(
+                context = getApplication(),
+                alertId = alert.id,
+                replyText = draft,
+            )
+            if (sent) {
+                dao.dismissProactiveAlert(alert.id)
+                ProactiveAlertNotifier.cancelAlertNotification(getApplication(), alert.id)
+                ProactiveAlertActionCache.remove(alert.id)
+                toastFlow.value = "${alert.senderName} için yanıt gönderildi."
+            } else {
+                openWhatsAppForAlert(alert, draft)
+            }
+        }
+    }
+
+    fun dismissProactiveAlert(alertId: Long) {
+        viewModelScope.launch {
+            dao.dismissProactiveAlert(alertId)
+            ProactiveAlertNotifier.cancelAlertNotification(getApplication(), alertId)
+            ProactiveAlertActionCache.remove(alertId)
+        }
+    }
+
     fun clearHistory() {
         viewModelScope.launch {
             dao.clearMessages()
@@ -621,6 +702,22 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         voiceManager.destroy()
         tts?.stop()
         tts?.shutdown()
+    }
+
+    private fun ProactiveAlertEntity.toProactiveDomain(): ProactiveAlertItem {
+        return ProactiveAlertItem(
+            id = id,
+            sourcePackage = sourcePackage,
+            senderName = senderName,
+            originalMessage = originalMessage,
+            summary = summary,
+            importanceScore = importanceScore,
+            importanceReason = importanceReason,
+            draftReply = draftReply,
+            messageTimestampMillis = messageTimestampMillis,
+            createdAtMillis = createdAtMillis,
+            isDismissed = isDismissed,
+        )
     }
 
     private fun ChatMessageEntity.toDomain(): JarvisMessage {

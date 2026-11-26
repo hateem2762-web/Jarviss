@@ -125,10 +125,14 @@ import com.example.data.preferences.UserPreferencesRepository
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
+import com.example.model.ProactiveAlertItem
+import com.example.notifications.ProactiveAlertActionCache
+import com.example.notifications.ProactiveAlertNotifier
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
 import com.example.system.VoiceInputManager
 import com.example.system.WakeWordManager
+import com.example.ui.components.ProactiveAlertCard
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCrimson
 import com.example.ui.theme.JarvisCyan
@@ -213,6 +217,9 @@ class JarvisOverlayService : Service() {
 
     private var labelDialogView: ComposeView? = null
     private var labelDialogLifecycle: OverlayLifecycleOwner? = null
+
+    private var proactiveAlertView: ComposeView? = null
+    private var proactiveAlertLifecycle: OverlayLifecycleOwner? = null
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -326,6 +333,12 @@ class JarvisOverlayService : Service() {
             ACTION_START_CROSSHAIR -> {
                 if (Settings.canDrawOverlays(this)) {
                     showCrosshairRecorder()
+                }
+            }
+            ACTION_SHOW_PROACTIVE_ALERT -> {
+                val alertId = intent.getLongExtra(EXTRA_PROACTIVE_ALERT_ID, -1L)
+                if (alertId > 0L && Settings.canDrawOverlays(this)) {
+                    showProactiveAlertWindow(alertId)
                 }
             }
             ACTION_SYNC_MODE -> {
@@ -1338,6 +1351,154 @@ class JarvisOverlayService : Service() {
         removeBubble()
         removeCrosshairWindows()
         removeLabelDialog()
+        removeProactiveAlertWindow()
+    }
+
+    private fun showProactiveAlertWindow(alertId: Long) {
+        serviceScope.launch {
+            val entity = dao.getProactiveAlertById(alertId) ?: return@launch
+            if (entity.isDismissed) return@launch
+            val item = ProactiveAlertItem(
+                id = entity.id,
+                sourcePackage = entity.sourcePackage,
+                senderName = entity.senderName,
+                originalMessage = entity.originalMessage,
+                summary = entity.summary,
+                importanceScore = entity.importanceScore,
+                importanceReason = entity.importanceReason,
+                draftReply = entity.draftReply,
+                messageTimestampMillis = entity.messageTimestampMillis,
+                createdAtMillis = entity.createdAtMillis,
+                isDismissed = entity.isDismissed,
+            )
+
+            removeProactiveAlertWindow()
+            val owner = OverlayLifecycleOwner().apply { onCreate() }
+            proactiveAlertLifecycle = owner
+
+            val params = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayLayoutType(),
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = (52 * resources.displayMetrics.density).roundToInt()
+                softInputMode = WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE
+            }
+
+            val view = ComposeView(this@JarvisOverlayService).apply {
+                setViewTreeLifecycleOwner(owner)
+                setViewTreeSavedStateRegistryOwner(owner)
+                setViewTreeViewModelStoreOwner(owner)
+                setContent {
+                    JarvisTheme(darkTheme = true) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 14.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            ProactiveAlertCard(
+                                alert = item,
+                                hasDirectReply = ProactiveAlertActionCache.hasDirectReply(item.id),
+                                onDraftChange = { edited ->
+                                    serviceScope.launch {
+                                        dao.updateProactiveDraft(item.id, edited)
+                                    }
+                                },
+                                onCopyDraft = { draft ->
+                                    ProactiveAlertActionCache.copyToClipboard(this@JarvisOverlayService, draft)
+                                    android.widget.Toast.makeText(
+                                        this@JarvisOverlayService,
+                                        "Taslak kopyalandı.",
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                },
+                                onOpenWhatsApp = { draft ->
+                                    ProactiveAlertActionCache.openWhatsAppChat(
+                                        context = this@JarvisOverlayService,
+                                        alertId = item.id,
+                                        sourcePackage = item.sourcePackage,
+                                        draftToCopy = draft,
+                                    )
+                                    ProactiveAlertNotifier.cancelAlertNotification(
+                                        this@JarvisOverlayService,
+                                        item.id
+                                    )
+                                    removeProactiveAlertWindow()
+                                },
+                                onSendDirectReply = { draft ->
+                                    val sent = ProactiveAlertActionCache.sendDirectReply(
+                                        context = this@JarvisOverlayService,
+                                        alertId = item.id,
+                                        replyText = draft,
+                                    )
+                                    if (sent) {
+                                        android.widget.Toast.makeText(
+                                            this@JarvisOverlayService,
+                                            "WhatsApp yanıtı gönderildi.",
+                                            android.widget.Toast.LENGTH_SHORT
+                                        ).show()
+                                        serviceScope.launch {
+                                            dao.dismissProactiveAlert(item.id)
+                                        }
+                                        ProactiveAlertNotifier.cancelAlertNotification(
+                                            this@JarvisOverlayService,
+                                            item.id
+                                        )
+                                        ProactiveAlertActionCache.remove(item.id)
+                                        removeProactiveAlertWindow()
+                                    } else {
+                                        ProactiveAlertActionCache.openWhatsAppChat(
+                                            context = this@JarvisOverlayService,
+                                            alertId = item.id,
+                                            sourcePackage = item.sourcePackage,
+                                            draftToCopy = draft,
+                                        )
+                                        removeProactiveAlertWindow()
+                                    }
+                                },
+                                onDismiss = {
+                                    serviceScope.launch {
+                                        dao.dismissProactiveAlert(item.id)
+                                    }
+                                    ProactiveAlertNotifier.cancelAlertNotification(
+                                        this@JarvisOverlayService,
+                                        item.id
+                                    )
+                                    ProactiveAlertActionCache.remove(item.id)
+                                    removeProactiveAlertWindow()
+                                },
+                                modifier = Modifier.widthIn(max = 540.dp),
+                            )
+                        }
+                    }
+                }
+            }
+
+            proactiveAlertView = view
+            try {
+                windowManager.addView(view, params)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to show proactive overlay alert", e)
+                removeProactiveAlertWindow()
+            }
+        }
+    }
+
+    private fun removeProactiveAlertWindow() {
+        proactiveAlertView?.let { v ->
+            try {
+                windowManager.removeView(v)
+            } catch (_: Exception) {
+            }
+        }
+        proactiveAlertView = null
+        proactiveAlertLifecycle?.onDestroy()
+        proactiveAlertLifecycle = null
     }
 
     override fun onDestroy() {
@@ -1359,11 +1520,13 @@ class JarvisOverlayService : Service() {
 
         const val ACTION_SHOW_OVERLAY = "com.example.action.SHOW_OVERLAY"
         const val ACTION_START_CROSSHAIR = "com.example.action.START_CROSSHAIR"
+        const val ACTION_SHOW_PROACTIVE_ALERT = "com.example.action.SHOW_PROACTIVE_ALERT"
         const val ACTION_SYNC_MODE = "com.example.action.SYNC_MODE"
         const val ACTION_DISABLE_ALL = "com.example.action.DISABLE_ALL_OVERLAY"
         const val ACTION_PAUSE_WAKE = "com.example.action.PAUSE_WAKE_WORD"
         const val ACTION_RESUME_WAKE = "com.example.action.RESUME_WAKE_WORD"
         const val ACTION_STOP_SERVICE = "com.example.action.STOP_OVERLAY_SERVICE"
+        const val EXTRA_PROACTIVE_ALERT_ID = "extra_proactive_alert_id"
 
         fun showOverlay(context: Context) {
             val intent = Intent(context, JarvisOverlayService::class.java).apply {
@@ -1375,6 +1538,14 @@ class JarvisOverlayService : Service() {
         fun startCrosshair(context: Context) {
             val intent = Intent(context, JarvisOverlayService::class.java).apply {
                 action = ACTION_START_CROSSHAIR
+            }
+            startForegroundSafely(context, intent)
+        }
+
+        fun showProactiveAlert(context: Context, alertId: Long) {
+            val intent = Intent(context, JarvisOverlayService::class.java).apply {
+                action = ACTION_SHOW_PROACTIVE_ALERT
+                putExtra(EXTRA_PROACTIVE_ALERT_ID, alertId)
             }
             startForegroundSafely(context, intent)
         }
