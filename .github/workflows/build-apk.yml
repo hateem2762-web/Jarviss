@@ -35,6 +35,17 @@ jobs:
         run: |
           sed -i 's/signingConfig = signingConfigs.getByName("debugConfig")/\/\/ signingConfig = signingConfigs.getByName("debugConfig")/' app/build.gradle.kts
 
+      - name: Restore google-services.json from Secret (if missing)
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
+          fi
+          if [ ! -f app/google-services.json ]; then
+            echo "::warning::app/google-services.json is missing! Firebase AI will not initialize in this APK."
+          fi
+
       - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace
 

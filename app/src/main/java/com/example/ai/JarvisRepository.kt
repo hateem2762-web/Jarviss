@@ -122,7 +122,7 @@ class JarvisRepository {
         }
 
         val primaryResult = executeStreamWithTimeout(
-            model = primaryModel,
+            modelProvider = { primaryModel },
             modelLabel = PRIMARY_MODEL,
             promptText = fullInput,
             timeoutMs = ATTEMPT_TIMEOUT_MS,
@@ -136,7 +136,7 @@ class JarvisRepository {
         if (primaryError is TimeoutCancellationException) {
             Log.w(TAG, "Primary model $PRIMARY_MODEL timed out; retrying with $FALLBACK_MODEL")
             val fallbackResult = executeStreamWithTimeout(
-                model = fallbackModel,
+                modelProvider = { fallbackModel },
                 modelLabel = FALLBACK_MODEL,
                 promptText = fullInput,
                 timeoutMs = ATTEMPT_TIMEOUT_MS,
@@ -147,7 +147,7 @@ class JarvisRepository {
                     val message = if (err is TimeoutCancellationException) {
                         "Bağlantı zaman aşımına uğradı. İnternet bağlantını kontrol edip tekrar dene."
                     } else {
-                        err.localizedMessage ?: "JARVIS şu anda yanıt üretemedi."
+                        formatAiError(err)
                     }
                     Result.failure(Exception(message))
                 }
@@ -163,6 +163,9 @@ class JarvisRepository {
         val raw = error?.localizedMessage.orEmpty()
         val lower = raw.lowercase(Locale.ROOT)
         return when {
+            lower.contains("default firebaseapp is not initialized") ||
+                lower.contains("firebaseapp.initializeapp") ->
+                "Firebase başlatılamadı: APK derlemesinde app/google-services.json eksik. GitHub Actions ile APK alıyorsanız app/google-services.json dosyasını repoya veya GOOGLE_SERVICES_JSON secret'ına ekleyin."
             lower.contains("403") ||
                 lower.contains("app check") ||
                 lower.contains("appcheck") ||
@@ -176,7 +179,7 @@ class JarvisRepository {
     }
 
     private suspend fun executeStreamWithTimeout(
-        model: GenerativeModel,
+        modelProvider: () -> GenerativeModel,
         modelLabel: String,
         promptText: String,
         timeoutMs: Long,
@@ -185,6 +188,7 @@ class JarvisRepository {
         val accumulated = StringBuilder()
 
         return try {
+            val model = modelProvider()
             Log.d(TAG, "Dispatching JARVIS request on $modelLabel")
             withTimeout(timeoutMs) {
                 model.generateContentStream(

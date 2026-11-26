@@ -32,6 +32,7 @@ import com.example.system.ReminderScheduler
 import com.example.system.VoiceInputManager
 import com.example.system.VoiceInputState
 import java.util.Locale
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -388,6 +389,13 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             ?: "JARVIS yanıt verirken bir hata oluştu."
                     }
                 )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "dispatchCommand failed", e)
+                lastFailedPromptFlow.value = text
+                errorFlow.value = e.localizedMessage
+                    ?: "Komut işlenirken beklenmeyen bir hata oluştu."
             } finally {
                 isProcessingFlow.value = false
             }

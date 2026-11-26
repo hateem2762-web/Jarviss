@@ -116,6 +116,7 @@ import com.example.MainActivity
 import com.example.R
 import com.example.accessibility.JarvisAccessibilityService
 import com.example.ai.JarvisRepository
+import com.example.ai.configureAppCheck
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
@@ -219,6 +220,7 @@ class JarvisOverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        configureAppCheck(this, null)
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         prefsRepo = UserPreferencesRepository(this)
         dao = JarvisDatabase.getInstance(this).jarvisDao()
