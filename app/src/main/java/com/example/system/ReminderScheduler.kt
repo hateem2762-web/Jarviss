@@ -8,7 +8,11 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
+import android.provider.Settings
+import android.util.Log
+import com.example.MainActivity
 import com.example.R
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
@@ -18,11 +22,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
+private const val TAG = "ReminderScheduler"
+
 object ReminderScheduler {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val inProcessJobs = ConcurrentHashMap<Long, Job>()
-    private val pendingIds = ConcurrentHashMap.newKeySet<Long>()
+    private val firedIds = ConcurrentHashMap.newKeySet<Long>()
 
     fun ensureNotificationChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -50,10 +56,30 @@ object ReminderScheduler {
         }
     }
 
+    fun canScheduleExactAlarms(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
+        return alarmManager.canScheduleExactAlarms()
+    }
+
+    fun openExactAlarmSettings(context: Context) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                data = Uri.parse("package:${context.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            try {
+                context.startActivity(intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "Unable to open exact alarm settings", e)
+            }
+        }
+    }
+
     fun markFiredIfPending(reminderId: Long): Boolean {
-        if (reminderId == 0L) return true
         inProcessJobs.remove(reminderId)?.cancel()
-        return pendingIds.remove(reminderId)
+        if (reminderId == 0L) return true
+        return firedIds.add(reminderId)
     }
 
     fun scheduleReminder(
@@ -65,7 +91,7 @@ object ReminderScheduler {
         ensureNotificationChannel(context)
         val appContext = context.applicationContext
         val delayMs = (triggerAtMillis - System.currentTimeMillis()).coerceAtLeast(1_000L)
-        pendingIds.add(reminderId)
+        firedIds.remove(reminderId)
 
         val alarmManager = appContext.getSystemService(Context.ALARM_SERVICE) as? AlarmManager
         val intent = Intent(appContext, ReminderReceiver::class.java).apply {
@@ -79,19 +105,50 @@ object ReminderScheduler {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val targetTime = System.currentTimeMillis() + delayMs
-        alarmManager?.setAndAllowWhileIdle(
-            AlarmManager.RTC_WAKEUP,
-            targetTime,
-            pendingIntent
+        val showIntent = PendingIntent.getActivity(
+            appContext,
+            (reminderId + 50_000L).toInt(),
+            Intent(appContext, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // Exact in-process precision timer for short reminders (e.g., 10 seconds) so Doze batching never delays them
-        if (delayMs <= 5 * 60_000L) {
+        val targetTime = System.currentTimeMillis() + delayMs
+        try {
+            if (alarmManager != null) {
+                val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
+                    alarmManager.canScheduleExactAlarms()
+                if (canExact) {
+                    alarmManager.setAlarmClock(
+                        AlarmManager.AlarmClockInfo(targetTime, showIntent),
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.setAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        targetTime,
+                        pendingIntent
+                    )
+                }
+            }
+        } catch (e: SecurityException) {
+            Log.w(TAG, "Exact alarm permission missing; falling back to setAndAllowWhileIdle", e)
+            alarmManager?.setAndAllowWhileIdle(
+                AlarmManager.RTC_WAKEUP,
+                targetTime,
+                pendingIntent
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "AlarmManager scheduling failed", e)
+        }
+
+        // Exact in-process precision timer (up to 60 minutes) to guarantee exact second/minute delivery while app or overlay service is alive
+        if (delayMs <= 60 * 60_000L) {
             inProcessJobs.remove(reminderId)?.cancel()
             inProcessJobs[reminderId] = scope.launch {
                 delay(delayMs)
-                if (pendingIds.contains(reminderId)) {
+                if (!firedIds.contains(reminderId)) {
                     appContext.sendBroadcast(
                         Intent(appContext, ReminderReceiver::class.java).apply {
                             putExtra(ReminderReceiver.EXTRA_REMINDER_ID, reminderId)
@@ -104,7 +161,7 @@ object ReminderScheduler {
     }
 
     fun cancelReminder(context: Context, reminderId: Long) {
-        pendingIds.remove(reminderId)
+        firedIds.add(reminderId)
         inProcessJobs.remove(reminderId)?.cancel()
 
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return

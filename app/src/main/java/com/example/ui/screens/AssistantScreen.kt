@@ -30,27 +30,25 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Launch
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Alarm
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
-import androidx.compose.material.icons.rounded.Home
+import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.material.icons.rounded.Layers
-import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
-import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -71,10 +69,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
@@ -103,12 +97,10 @@ private data class QuickCommandPrompt(
 )
 
 private val StarterCommands = listOf(
-    QuickCommandPrompt("Ayarları aç", "Ayarları aç", Icons.AutoMirrored.Rounded.Launch),
-    QuickCommandPrompt("10 sn hatırlatıcı", "10 saniye sonra su içmeyi hatırlat", Icons.Rounded.Alarm),
-    QuickCommandPrompt("YouTube'da lofi ara", "YouTube'da lofi beats ara", Icons.Rounded.PlayCircle),
-    QuickCommandPrompt("İş başvurusu yaz", "Bana kısa ve profesyonel bir iş başvurusu ön yazısı hazırla", Icons.Rounded.Lightbulb),
-    QuickCommandPrompt("github.com aç", "github.com sitesini aç", Icons.Rounded.Public),
-    QuickCommandPrompt("Ana ekrana dön", "Ana ekrana dön", Icons.Rounded.Home),
+    QuickCommandPrompt("Ekranı not al", "Bu ekranı not al", Icons.Rounded.EditNote),
+    QuickCommandPrompt("Feneri aç", "Feneri aç", Icons.Rounded.FlashlightOn),
+    QuickCommandPrompt("3 dk hatırlatıcı", "3 dakika sonra kontrol etmeyi hatırlat", Icons.Rounded.Alarm),
+    QuickCommandPrompt("Pil durumu", "Şarjım kaç?", Icons.Rounded.BatteryChargingFull),
 )
 
 @Composable
@@ -143,7 +135,6 @@ fun AssistantScreen(
 ) {
     var inputText by rememberSaveable { mutableStateOf("") }
     val listState = rememberLazyListState()
-    val primaryGlow = MaterialTheme.colorScheme.primary
 
     LaunchedEffect(uiState.messages.size) {
         if (uiState.messages.isNotEmpty()) {
@@ -156,19 +147,7 @@ fun AssistantScreen(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .drawBehind {
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            primaryGlow.copy(alpha = 0.08f),
-                            Color.Transparent,
-                        ),
-                        center = Offset(size.width * 0.5f, size.height * 0.16f),
-                        radius = size.maxDimension * 0.55f,
-                    )
-                )
-            },
+            .background(MaterialTheme.colorScheme.background),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         JarvisTopHudBar(
@@ -183,7 +162,6 @@ fun AssistantScreen(
         val needsNotifListenerSetup = uiState.preferences.proactiveAlertsEnabled &&
             !hasNotificationListenerPermission
 
-        // Overlay, Mic, Accessibility & Notification Listener Permission Setup Banner
         if (!hasOverlayPermission || !hasMicPermission || !hasAccessibilityPermission || needsNotifListenerSetup) {
             PermissionOnboardingCard(
                 hasOverlayPermission = hasOverlayPermission,
@@ -205,14 +183,13 @@ fun AssistantScreen(
             uiState.preferences.wakeWordEnabled
 
         if (hasOverlayPermission || anyOverlayActive) {
-            @OptIn(ExperimentalLayoutApi::class)
-            FlowRow(
+            Row(
                 modifier = Modifier
                     .widthIn(max = 720.dp)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (anyOverlayActive) {
                     OutlinedButton(
@@ -220,18 +197,16 @@ fun AssistantScreen(
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
                             .testTag("assistant_disable_overlays_button"),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.PowerSettingsNew,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Baloncuğu Kapat",
-                            style = MaterialTheme.typography.labelMedium,
-                        )
+                        Spacer(modifier = Modifier.width(5.dp))
+                        Text("Kapat", style = MaterialTheme.typography.labelSmall)
                     }
                 }
 
@@ -242,45 +217,59 @@ fun AssistantScreen(
                             .minimumInteractiveComponentSize()
                             .testTag("assistant_wake_word_button"),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        border = BorderStroke(
+                            1.dp,
+                            if (uiState.preferences.wakeWordEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.outlineVariant
+                            },
+                        ),
                     ) {
                         Icon(
                             imageVector = Icons.Rounded.RecordVoiceOver,
                             contentDescription = null,
-                            modifier = Modifier.size(16.dp),
+                            modifier = Modifier.size(15.dp),
                             tint = if (uiState.preferences.wakeWordEnabled) {
                                 MaterialTheme.colorScheme.primary
                             } else {
                                 MaterialTheme.colorScheme.onSurfaceVariant
                             },
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
-                            text = if (uiState.preferences.wakeWordEnabled) {
-                                "\"Jarvis\": Açık"
-                            } else {
-                                "\"Jarvis\" Dinle"
-                            },
-                            style = MaterialTheme.typography.labelMedium,
+                            text = if (uiState.preferences.wakeWordEnabled) "\"Jarvis\": Açık" else "\"Jarvis\" Dinle",
+                            style = MaterialTheme.typography.labelSmall,
                         )
                     }
 
-                    FilledTonalButton(
-                        onClick = onLaunchOverlay,
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = MaterialTheme.colorScheme.surfaceVariant,
+                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                         modifier = Modifier
                             .minimumInteractiveComponentSize()
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable(onClick = onLaunchOverlay)
                             .testTag("launch_overlay_button"),
-                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PictureInPictureAlt,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Küçük Pencere Aç",
-                            style = MaterialTheme.typography.labelLarge,
-                        )
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PictureInPictureAlt,
+                                contentDescription = null,
+                                tint = JarvisCyan,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Text(
+                                text = "Kayan Pencere",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
                     }
                 }
             }
@@ -342,16 +331,14 @@ fun AssistantScreen(
                     if (uiState.voiceState.isListening) {
                         item(key = "listening_live") {
                             LiveStatusRow(
-                                text = uiState.voiceState.partialText.ifBlank {
-                                    "Seni dinliyorum…"
-                                },
+                                text = uiState.voiceState.partialText.ifBlank { "Seni dinliyorum…" },
                                 isLoading = false,
                             )
                         }
                     } else if (uiState.isProcessing) {
                         item(key = "processing_live") {
                             LiveStatusRow(
-                                text = "Komut çözümleniyor…",
+                                text = "Komut işleniyor…",
                                 isLoading = true,
                             )
                         }
@@ -443,15 +430,15 @@ private fun PermissionOnboardingCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(16.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f),
-        border = BorderStroke(1.dp, JarvisAmber.copy(alpha = 0.55f)),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, JarvisAmber.copy(alpha = 0.45f)),
     ) {
         Column(
-            modifier = Modifier.padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = "Tam erişim, dokunma ve WhatsApp takibi için eksik izinler:",
+                text = "Tam kontrol için eksik izinler:",
                 style = MaterialTheme.typography.titleSmall,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -467,13 +454,9 @@ private fun PermissionOnboardingCard(
                             .testTag("grant_overlay_permission_button"),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Layers,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
+                        Icon(imageVector = Icons.Rounded.Layers, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Üstte Göster İzni Ver", style = MaterialTheme.typography.labelMedium)
+                        Text("Üstte Göster", style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 if (!hasMicPermission) {
@@ -484,13 +467,9 @@ private fun PermissionOnboardingCard(
                             .testTag("grant_mic_permission_button"),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Mic,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
+                        Icon(imageVector = Icons.Rounded.Mic, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Mikrofon İzni Ver", style = MaterialTheme.typography.labelMedium)
+                        Text("Mikrofon", style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 if (!hasAccessibilityPermission) {
@@ -501,13 +480,9 @@ private fun PermissionOnboardingCard(
                             .testTag("grant_accessibility_permission_button"),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.AccessibilityNew,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
+                        Icon(imageVector = Icons.Rounded.AccessibilityNew, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Erişilebilirlik Aç", style = MaterialTheme.typography.labelMedium)
+                        Text("Erişilebilirlik", style = MaterialTheme.typography.labelSmall)
                     }
                 }
                 if (showNotificationListenerButton) {
@@ -518,13 +493,9 @@ private fun PermissionOnboardingCard(
                             .testTag("grant_notification_listener_button"),
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.NotificationsActive,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                        )
+                        Icon(imageVector = Icons.Rounded.NotificationsActive, contentDescription = null, modifier = Modifier.size(15.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text("Bildirim Erişimi Aç", style = MaterialTheme.typography.labelMedium)
+                        Text("Bildirim Erişimi", style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }
@@ -539,21 +510,15 @@ private fun EmptyAssistantHud(
     modifier: Modifier = Modifier,
 ) {
     Column(
-        modifier = modifier.padding(horizontal = 20.dp, vertical = 16.dp),
+        modifier = modifier.padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.Center,
     ) {
         Box(
             modifier = Modifier
-                .size(96.dp)
+                .size(76.dp)
                 .clip(CircleShape)
-                .border(
-                    width = 2.dp,
-                    brush = Brush.linearGradient(
-                        listOf(JarvisCyan, MaterialTheme.colorScheme.secondary)
-                    ),
-                    shape = CircleShape,
-                ),
+                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
             contentAlignment = Alignment.Center,
         ) {
             Image(
@@ -564,7 +529,7 @@ private fun EmptyAssistantHud(
             )
         }
 
-        Spacer(modifier = Modifier.height(14.dp))
+        Spacer(modifier = Modifier.height(16.dp))
 
         Text(
             text = stringResource(R.string.empty_title),
@@ -582,19 +547,18 @@ private fun EmptyAssistantHud(
             textAlign = TextAlign.Center,
         )
 
-        Spacer(modifier = Modifier.height(18.dp))
+        Spacer(modifier = Modifier.height(22.dp))
 
         FlowRow(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             StarterCommands.forEachIndexed { index, item ->
                 Surface(
                     shape = RoundedCornerShape(14.dp),
                     color = MaterialTheme.colorScheme.surface,
                     border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    tonalElevation = 1.dp,
                     modifier = Modifier
                         .minimumInteractiveComponentSize()
                         .clip(RoundedCornerShape(14.dp))
@@ -602,7 +566,7 @@ private fun EmptyAssistantHud(
                         .testTag("quick_command_chip_$index"),
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
@@ -610,7 +574,7 @@ private fun EmptyAssistantHud(
                             imageVector = item.icon,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(17.dp),
+                            modifier = Modifier.size(16.dp),
                         )
                         Text(
                             text = item.label,
@@ -638,24 +602,23 @@ private fun MessageBubble(
     ) {
         if (message.isUser) {
             Surface(
-                shape = RoundedCornerShape(18.dp, 18.dp, 4.dp, 18.dp),
-                color = MaterialTheme.colorScheme.primaryContainer,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.35f)),
+                shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                 modifier = Modifier.widthIn(max = 520.dp),
             ) {
                 Text(
                     text = message.text,
                     style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer,
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
                 )
             }
         } else {
             Surface(
-                shape = RoundedCornerShape(18.dp, 18.dp, 18.dp, 4.dp),
+                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
                 color = MaterialTheme.colorScheme.surface,
                 border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                tonalElevation = 2.dp,
                 modifier = Modifier.fillMaxWidth(0.95f),
             ) {
                 Column(
@@ -689,11 +652,7 @@ private fun MessageBubble(
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.ContentCopy,
-                                contentDescription = null,
-                                modifier = Modifier.size(14.dp),
-                            )
+                            Icon(imageVector = Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Kopyala", style = MaterialTheme.typography.labelSmall)
                         }
@@ -707,17 +666,13 @@ private fun MessageBubble(
                             border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                         ) {
                             Icon(
-                                imageVector = if (isSpeaking) {
-                                    Icons.Rounded.StopCircle
-                                } else {
-                                    Icons.AutoMirrored.Rounded.VolumeUp
-                                },
+                                imageVector = if (isSpeaking) Icons.Rounded.StopCircle else Icons.AutoMirrored.Rounded.VolumeUp,
                                 contentDescription = null,
                                 modifier = Modifier.size(15.dp),
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (isSpeaking) "Durdur" else "Sesli Oku",
+                                text = if (isSpeaking) "Durdur" else "Dinle",
                                 style = MaterialTheme.typography.labelSmall,
                             )
                         }
@@ -735,8 +690,8 @@ private fun LiveStatusRow(
 ) {
     Surface(
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.65f),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)),
+        color = MaterialTheme.colorScheme.surface,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -770,20 +725,19 @@ private fun CommandDock(
     onVoiceOrbClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Surface(
+    Column(
         modifier = modifier
             .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background)
             .imePadding(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 4.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {
+        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 8.dp),
+                .padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             OutlinedTextField(
                 value = inputText,
@@ -803,9 +757,9 @@ private fun CommandDock(
                 keyboardActions = KeyboardActions(onSend = { onSend() }),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outline,
-                    focusedContainerColor = MaterialTheme.colorScheme.background.copy(alpha = 0.5f),
-                    unfocusedContainerColor = MaterialTheme.colorScheme.background.copy(alpha = 0.5f),
+                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant,
+                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surface,
                 ),
             )
 
@@ -816,8 +770,8 @@ private fun CommandDock(
                         .size(48.dp)
                         .testTag("send_command_button"),
                     colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.secondary,
-                        contentColor = MaterialTheme.colorScheme.onSecondary,
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary,
                     ),
                 ) {
                     Icon(

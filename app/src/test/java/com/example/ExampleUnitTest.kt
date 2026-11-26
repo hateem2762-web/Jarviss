@@ -4,6 +4,8 @@ import com.example.model.ActionIntent
 import com.example.model.JarvisAction
 import com.example.model.TapCoordinateItem
 import com.example.system.CoordinateMatcher
+import com.example.system.LocalQuickCommandMatcher
+import com.example.system.ReminderDurationParser
 import com.example.system.WakeWordManager
 import com.example.system.WhatsAppMessageFilter
 import org.junit.Assert.assertEquals
@@ -22,6 +24,11 @@ class ExampleUnitTest {
         assertEquals(ActionIntent.SET_REMINDER, ActionIntent.fromWire("set_reminder"))
         assertEquals(ActionIntent.GO_HOME, ActionIntent.fromWire("go_home"))
         assertEquals(ActionIntent.TAP_COORDINATE, ActionIntent.fromWire("tap_coordinate"))
+        assertEquals(ActionIntent.TORCH_CONTROL, ActionIntent.fromWire("torch_control"))
+        assertEquals(ActionIntent.VOLUME_CONTROL, ActionIntent.fromWire("volume_control"))
+        assertEquals(ActionIntent.BATTERY_STATUS, ActionIntent.fromWire("battery_status"))
+        assertEquals(ActionIntent.OPEN_SYSTEM_SETTINGS, ActionIntent.fromWire("open_system_settings"))
+        assertEquals(ActionIntent.CAPTURE_SCREEN_NOTE, ActionIntent.fromWire("capture_screen_note"))
         assertEquals(ActionIntent.NONE, ActionIntent.fromWire("unknown"))
     }
 
@@ -138,5 +145,75 @@ class ExampleUnitTest {
                 "Yarınki saat 10:00 toplantısı 14:30'a alındı, sunumu güncelleyebilir misin?"
             )
         )
+    }
+
+    @Test
+    fun reminder_duration_parser_extracts_exact_durations_and_clock_times() {
+        val threeMins = ReminderDurationParser.parse("3 dk sonra fırını kapatmayı hatırlat")
+        assertEquals(3, threeMins?.minutes)
+        assertNull(threeMins?.seconds)
+        assertEquals(180_000L, threeMins?.totalMillis)
+
+        val twentySecs = ReminderDurationParser.parse("20 saniye sonra bana haber ver")
+        assertNull(twentySecs?.minutes)
+        assertEquals(20, twentySecs?.seconds)
+        assertEquals(20_000L, twentySecs?.totalMillis)
+
+        val halfHour = ReminderDurationParser.parse("yarım saat sonra toplantı var")
+        assertEquals(30, halfHour?.minutes)
+
+        val onePointFiveHours = ReminderDurationParser.parse("1.5 saat sonra su içmeyi hatırlat")
+        assertEquals(90, onePointFiveHours?.minutes)
+
+        val bukukHours = ReminderDurationParser.parse("bir buçuk saat sonra ilacı hatırlat")
+        assertEquals(90, bukukHours?.minutes)
+
+        val wordMinutes = ReminderDurationParser.parse("beş dakika sonra beni uyar")
+        assertEquals(5, wordMinutes?.minutes)
+
+        val cal = java.util.Calendar.getInstance().apply {
+            set(2026, java.util.Calendar.NOVEMBER, 26, 14, 0, 0)
+            set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val sameDayTarget = ReminderDurationParser.parse("saat 16:30'da toplantıyı hatırlat", cal.timeInMillis)
+        assertEquals(150, sameDayTarget?.minutes)
+
+        val nextDayTarget = ReminderDurationParser.parse("saat 09:00'da alarm kur", cal.timeInMillis)
+        assertEquals(19 * 60, nextDayTarget?.minutes)
+    }
+
+    @Test
+    fun local_quick_command_matcher_handles_notes_torch_battery_and_settings() {
+        assertEquals(
+            ActionIntent.CAPTURE_SCREEN_NOTE,
+            LocalQuickCommandMatcher.match("Jarvis bu ekranı not al")?.intent
+        )
+        assertEquals(
+            ActionIntent.CAPTURE_SCREEN_NOTE,
+            LocalQuickCommandMatcher.match("Şu ekranı not al")?.intent
+        )
+        assertEquals(
+            ActionIntent.CAPTURE_SCREEN_NOTE,
+            LocalQuickCommandMatcher.match("Bunu not defterine kaydet")?.intent
+        )
+
+        val torchOn = LocalQuickCommandMatcher.match("Feneri aç")
+        assertEquals(ActionIntent.TORCH_CONTROL, torchOn?.intent)
+        assertEquals("on", torchOn?.target)
+
+        val torchOff = LocalQuickCommandMatcher.match("Feneri kapat")
+        assertEquals(ActionIntent.TORCH_CONTROL, torchOff?.intent)
+        assertEquals("off", torchOff?.target)
+
+        assertEquals(
+            ActionIntent.BATTERY_STATUS,
+            LocalQuickCommandMatcher.match("Şarjım kaç?")?.intent
+        )
+
+        val wifiSettings = LocalQuickCommandMatcher.match("Wi-Fi ayarlarını aç")
+        assertEquals(ActionIntent.OPEN_SYSTEM_SETTINGS, wifiSettings?.intent)
+        assertEquals("wifi", wifiSettings?.target)
+
+        assertNull(LocalQuickCommandMatcher.match("Türkiye'nin başkenti neresidir?"))
     }
 }

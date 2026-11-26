@@ -17,6 +17,10 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.example.MainActivity
 import com.example.R
+import com.example.data.local.JarvisDatabase
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 
 private const val TAG = "ReminderReceiver"
 
@@ -29,6 +33,20 @@ class ReminderReceiver : BroadcastReceiver() {
 
         val message = intent.getStringExtra(EXTRA_REMINDER_MESSAGE)
             ?: "JARVIS hatırlatıcısı zamanı geldi."
+
+        if (reminderId > 0L) {
+            val pendingResult = goAsync()
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    JarvisDatabase.getInstance(context).jarvisDao()
+                        .setReminderCompleted(reminderId, true)
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed marking reminder completed", e)
+                } finally {
+                    pendingResult.finish()
+                }
+            }
+        }
 
         ReminderScheduler.ensureNotificationChannel(context)
 

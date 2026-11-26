@@ -85,7 +85,7 @@ fun ProactiveAlertCard(
         shape = RoundedCornerShape(18.dp),
         color = MaterialTheme.colorScheme.surface,
         border = BorderStroke(1.dp, scoreColor.copy(alpha = 0.5f)),
-        tonalElevation = 2.dp,
+        tonalElevation = 0.dp,
     ) {
         Column(
             modifier = Modifier.padding(14.dp),

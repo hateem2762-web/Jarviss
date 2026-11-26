@@ -67,6 +67,18 @@ data class ProactiveAlertEntity(
     val isDismissed: Boolean = false,
 )
 
+@Entity(tableName = "notes")
+data class NoteEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val title: String,
+    val content: String,
+    val sourcePackage: String,
+    val sourceAppName: String,
+    val screenshotPath: String = "",
+    val createdAtMillis: Long = System.currentTimeMillis(),
+    val updatedAtMillis: Long = System.currentTimeMillis(),
+)
+
 @Dao
 interface JarvisDao {
     @Query("SELECT * FROM chat_messages ORDER BY timestampMillis ASC, id ASC")
@@ -130,6 +142,24 @@ interface JarvisDao {
 
     @Query("UPDATE proactive_alerts SET isDismissed = 1")
     suspend fun dismissAllProactiveAlerts()
+
+    @Query("SELECT * FROM notes ORDER BY updatedAtMillis DESC, id DESC")
+    fun observeNotes(): Flow<List<NoteEntity>>
+
+    @Query("SELECT * FROM notes ORDER BY updatedAtMillis DESC, id DESC")
+    suspend fun getAllNotes(): List<NoteEntity>
+
+    @Query("SELECT * FROM notes WHERE id = :id LIMIT 1")
+    suspend fun getNoteById(id: Long): NoteEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertNote(entity: NoteEntity): Long
+
+    @Query("UPDATE notes SET title = :title, content = :content, updatedAtMillis = :updatedAtMillis WHERE id = :id")
+    suspend fun updateNote(id: Long, title: String, content: String, updatedAtMillis: Long)
+
+    @Query("DELETE FROM notes WHERE id = :id")
+    suspend fun deleteNote(id: Long)
 }
 
 @Database(
@@ -138,8 +168,9 @@ interface JarvisDao {
         ReminderEntity::class,
         TapCoordinateEntity::class,
         ProactiveAlertEntity::class,
+        NoteEntity::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false,
 )
 abstract class JarvisDatabase : RoomDatabase() {

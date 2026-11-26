@@ -15,6 +15,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -24,20 +25,25 @@ import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Alarm
 import androidx.compose.material.icons.outlined.AutoAwesome
+import androidx.compose.material.icons.outlined.EditNote
 import androidx.compose.material.icons.outlined.MyLocation
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
+import androidx.compose.material3.NavigationRailItemDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -55,6 +61,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
@@ -69,9 +76,11 @@ import com.example.notifications.JarvisNotificationListenerService
 import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
 import com.example.overlay.OverlayLaunchActivity
+import com.example.system.ReminderScheduler
 import com.example.ui.JarvisViewModel
 import com.example.ui.screens.AssistantScreen
 import com.example.ui.screens.CoordinatesScreen
+import com.example.ui.screens.NotesScreen
 import com.example.ui.screens.RemindersScreen
 import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.JarvisTheme
@@ -133,6 +142,9 @@ fun JarvisApp(
     var hasNotificationListenerPermission by remember {
         mutableStateOf(JarvisNotificationListenerService.isNotificationListenerEnabled(context))
     }
+    var hasExactAlarmPermission by remember {
+        mutableStateOf(ReminderScheduler.canScheduleExactAlarms(context))
+    }
     var hasMicPermission by remember {
         mutableStateOf(
             ContextCompat.checkSelfPermission(
@@ -165,6 +177,7 @@ fun JarvisApp(
                 hasAccessibilityPermission = JarvisAccessibilityService.isAccessibilityEnabled(context)
                 hasNotificationListenerPermission =
                     JarvisNotificationListenerService.isNotificationListenerEnabled(context)
+                hasExactAlarmPermission = ReminderScheduler.canScheduleExactAlarms(context)
                 hasMicPermission = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO
@@ -307,7 +320,6 @@ fun JarvisApp(
         }
     }
 
-    // Request notification permission on Android 13+ when background, proactive alerts, or reminders require it
     val needsServiceOrReminders = uiState.reminders.isNotEmpty() ||
         uiState.preferences.persistentTriggerEnabled ||
         uiState.preferences.floatingBubbleEnabled ||
@@ -414,6 +426,14 @@ fun JarvisApp(
                                 onDismissError = viewModel::dismissError,
                             )
 
+                            JarvisDestination.NOTES -> NotesScreen(
+                                notes = uiState.notes,
+                                onAddNote = viewModel::addManualNote,
+                                onUpdateNote = viewModel::updateNote,
+                                onDeleteNote = viewModel::deleteNote,
+                                onCopyNote = viewModel::copyTextToClipboard,
+                            )
+
                             JarvisDestination.COORDINATES -> CoordinatesScreen(
                                 uiState = uiState,
                                 hasAccessibilityPermission = hasAccessibilityPermission,
@@ -426,6 +446,10 @@ fun JarvisApp(
 
                             JarvisDestination.REMINDERS -> RemindersScreen(
                                 reminders = uiState.reminders,
+                                canScheduleExactAlarms = hasExactAlarmPermission,
+                                onRequestExactAlarmPermission = {
+                                    ReminderScheduler.openExactAlarmSettings(context)
+                                },
                                 onToggleComplete = viewModel::toggleReminderComplete,
                                 onDeleteReminder = viewModel::deleteReminder,
                                 onExportTimer = viewModel::exportReminderToSystemTimer,
@@ -471,73 +495,136 @@ private fun JarvisBottomNavBar(
     activeRemindersCount: Int,
     onSelect: (JarvisDestination) -> Unit,
 ) {
-    NavigationBar(
-        containerColor = MaterialTheme.colorScheme.surface,
-        tonalElevation = 3.dp,
-    ) {
-        NavigationBarItem(
-            selected = currentDestination == JarvisDestination.ASSISTANT,
-            onClick = { onSelect(JarvisDestination.ASSISTANT) },
-            modifier = Modifier.testTag("nav_assistant"),
-            icon = {
-                Icon(
-                    imageVector = if (currentDestination == JarvisDestination.ASSISTANT) {
-                        Icons.Rounded.AutoAwesome
-                    } else {
-                        Icons.Outlined.AutoAwesome
-                    },
-                    contentDescription = stringResource(R.string.nav_assistant),
-                )
-            },
-            label = { Text(stringResource(R.string.nav_assistant)) },
-        )
+    val itemColors = NavigationBarItemDefaults.colors(
+        selectedIconColor = MaterialTheme.colorScheme.primary,
+        selectedTextColor = MaterialTheme.colorScheme.onSurface,
+        indicatorColor = MaterialTheme.colorScheme.surfaceVariant,
+        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 
-        NavigationBarItem(
-            selected = currentDestination == JarvisDestination.COORDINATES,
-            onClick = { onSelect(JarvisDestination.COORDINATES) },
-            modifier = Modifier.testTag("nav_coordinates"),
-            icon = {
-                Icon(
-                    imageVector = if (currentDestination == JarvisDestination.COORDINATES) {
-                        Icons.Rounded.MyLocation
-                    } else {
-                        Icons.Outlined.MyLocation
-                    },
-                    contentDescription = stringResource(R.string.nav_coordinates),
-                )
-            },
-            label = { Text(stringResource(R.string.nav_coordinates)) },
-        )
+    Column {
+        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
+        NavigationBar(
+            containerColor = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+        ) {
+            NavigationBarItem(
+                selected = currentDestination == JarvisDestination.ASSISTANT,
+                onClick = { onSelect(JarvisDestination.ASSISTANT) },
+                modifier = Modifier.testTag("nav_assistant"),
+                colors = itemColors,
+                icon = {
+                    Icon(
+                        imageVector = if (currentDestination == JarvisDestination.ASSISTANT) {
+                            Icons.Rounded.AutoAwesome
+                        } else {
+                            Icons.Outlined.AutoAwesome
+                        },
+                        contentDescription = stringResource(R.string.nav_assistant),
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(R.string.nav_assistant),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
 
-        NavigationBarItem(
-            selected = currentDestination == JarvisDestination.REMINDERS,
-            onClick = { onSelect(JarvisDestination.REMINDERS) },
-            modifier = Modifier.testTag("nav_reminders"),
-            icon = {
-                RemindersBadgeIcon(
-                    selected = currentDestination == JarvisDestination.REMINDERS,
-                    count = activeRemindersCount,
-                )
-            },
-            label = { Text(stringResource(R.string.nav_reminders)) },
-        )
+            NavigationBarItem(
+                selected = currentDestination == JarvisDestination.NOTES,
+                onClick = { onSelect(JarvisDestination.NOTES) },
+                modifier = Modifier.testTag("nav_notes"),
+                colors = itemColors,
+                icon = {
+                    Icon(
+                        imageVector = if (currentDestination == JarvisDestination.NOTES) {
+                            Icons.Rounded.EditNote
+                        } else {
+                            Icons.Outlined.EditNote
+                        },
+                        contentDescription = stringResource(R.string.nav_notes),
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(R.string.nav_notes),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
 
-        NavigationBarItem(
-            selected = currentDestination == JarvisDestination.SETTINGS,
-            onClick = { onSelect(JarvisDestination.SETTINGS) },
-            modifier = Modifier.testTag("nav_settings"),
-            icon = {
-                Icon(
-                    imageVector = if (currentDestination == JarvisDestination.SETTINGS) {
-                        Icons.Rounded.Tune
-                    } else {
-                        Icons.Outlined.Tune
-                    },
-                    contentDescription = stringResource(R.string.nav_settings),
-                )
-            },
-            label = { Text(stringResource(R.string.nav_settings)) },
-        )
+            NavigationBarItem(
+                selected = currentDestination == JarvisDestination.COORDINATES,
+                onClick = { onSelect(JarvisDestination.COORDINATES) },
+                modifier = Modifier.testTag("nav_coordinates"),
+                colors = itemColors,
+                icon = {
+                    Icon(
+                        imageVector = if (currentDestination == JarvisDestination.COORDINATES) {
+                            Icons.Rounded.MyLocation
+                        } else {
+                            Icons.Outlined.MyLocation
+                        },
+                        contentDescription = stringResource(R.string.nav_coordinates),
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(R.string.nav_coordinates),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+
+            NavigationBarItem(
+                selected = currentDestination == JarvisDestination.REMINDERS,
+                onClick = { onSelect(JarvisDestination.REMINDERS) },
+                modifier = Modifier.testTag("nav_reminders"),
+                colors = itemColors,
+                icon = {
+                    RemindersBadgeIcon(
+                        selected = currentDestination == JarvisDestination.REMINDERS,
+                        count = activeRemindersCount,
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(R.string.nav_reminders),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+
+            NavigationBarItem(
+                selected = currentDestination == JarvisDestination.SETTINGS,
+                onClick = { onSelect(JarvisDestination.SETTINGS) },
+                modifier = Modifier.testTag("nav_settings"),
+                colors = itemColors,
+                icon = {
+                    Icon(
+                        imageVector = if (currentDestination == JarvisDestination.SETTINGS) {
+                            Icons.Rounded.Tune
+                        } else {
+                            Icons.Outlined.Tune
+                        },
+                        contentDescription = stringResource(R.string.nav_settings),
+                    )
+                },
+                label = {
+                    Text(
+                        text = stringResource(R.string.nav_settings),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+            )
+        }
     }
 }
 
@@ -548,6 +635,14 @@ private fun JarvisNavRail(
     onSelect: (JarvisDestination) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val itemColors = NavigationRailItemDefaults.colors(
+        selectedIconColor = MaterialTheme.colorScheme.primary,
+        selectedTextColor = MaterialTheme.colorScheme.onSurface,
+        indicatorColor = MaterialTheme.colorScheme.surfaceVariant,
+        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+
     NavigationRail(
         modifier = modifier,
         containerColor = MaterialTheme.colorScheme.surface,
@@ -556,6 +651,7 @@ private fun JarvisNavRail(
             selected = currentDestination == JarvisDestination.ASSISTANT,
             onClick = { onSelect(JarvisDestination.ASSISTANT) },
             modifier = Modifier.testTag("rail_assistant"),
+            colors = itemColors,
             icon = {
                 Icon(
                     imageVector = if (currentDestination == JarvisDestination.ASSISTANT) {
@@ -570,9 +666,28 @@ private fun JarvisNavRail(
         )
 
         NavigationRailItem(
+            selected = currentDestination == JarvisDestination.NOTES,
+            onClick = { onSelect(JarvisDestination.NOTES) },
+            modifier = Modifier.testTag("rail_notes"),
+            colors = itemColors,
+            icon = {
+                Icon(
+                    imageVector = if (currentDestination == JarvisDestination.NOTES) {
+                        Icons.Rounded.EditNote
+                    } else {
+                        Icons.Outlined.EditNote
+                    },
+                    contentDescription = stringResource(R.string.nav_notes),
+                )
+            },
+            label = { Text(stringResource(R.string.nav_notes)) },
+        )
+
+        NavigationRailItem(
             selected = currentDestination == JarvisDestination.COORDINATES,
             onClick = { onSelect(JarvisDestination.COORDINATES) },
             modifier = Modifier.testTag("rail_coordinates"),
+            colors = itemColors,
             icon = {
                 Icon(
                     imageVector = if (currentDestination == JarvisDestination.COORDINATES) {
@@ -590,6 +705,7 @@ private fun JarvisNavRail(
             selected = currentDestination == JarvisDestination.REMINDERS,
             onClick = { onSelect(JarvisDestination.REMINDERS) },
             modifier = Modifier.testTag("rail_reminders"),
+            colors = itemColors,
             icon = {
                 RemindersBadgeIcon(
                     selected = currentDestination == JarvisDestination.REMINDERS,
@@ -603,6 +719,7 @@ private fun JarvisNavRail(
             selected = currentDestination == JarvisDestination.SETTINGS,
             onClick = { onSelect(JarvisDestination.SETTINGS) },
             modifier = Modifier.testTag("rail_settings"),
+            colors = itemColors,
             icon = {
                 Icon(
                     imageVector = if (currentDestination == JarvisDestination.SETTINGS) {

@@ -68,7 +68,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MyLocation
-import androidx.compose.material.icons.rounded.PowerSettingsNew
+import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -130,6 +130,7 @@ import com.example.notifications.ProactiveAlertActionCache
 import com.example.notifications.ProactiveAlertNotifier
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
+import com.example.system.LocalQuickCommandMatcher
 import com.example.system.VoiceInputManager
 import com.example.system.WakeWordManager
 import com.example.ui.components.ProactiveAlertCard
@@ -232,7 +233,7 @@ class JarvisOverlayService : Service() {
         prefsRepo = UserPreferencesRepository(this)
         dao = JarvisDatabase.getInstance(this).jarvisDao()
         coordinateStore = CoordinateJsonStore(this, dao)
-        actionExecutor = JarvisActionExecutor(this, dao)
+        actionExecutor = JarvisActionExecutor(this, dao, aiRepository)
         voiceManager = VoiceInputManager(this)
         wakeWordManager = WakeWordManager(this) { trailingCommand ->
             if (Settings.canDrawOverlays(this)) {
@@ -565,6 +566,7 @@ class JarvisOverlayService : Service() {
                             }
                         },
                         onSendText = { query -> submitQuery(query) },
+                        onCaptureScreenNote = { submitQuery("Bu ekranı not al") },
                         onRecordPoint = { showCrosshairRecorder() },
                         onCopyReply = { copyReplyToClipboard() },
                         onToggleTts = { toggleTts() },
@@ -575,8 +577,7 @@ class JarvisOverlayService : Service() {
                             startActivity(appIntent)
                             collapseOrStopOverlay()
                         },
-                        onClose = { collapseOrStopOverlay() },
-                        onDisableCompletely = { disableAllOverlayModesCompletely() },
+                        onClose = { minimizeToFloatingBubble() },
                     )
                 }
             }
@@ -708,6 +709,54 @@ class JarvisOverlayService : Service() {
                     return@launch
                 }
 
+                // 0-TOKEN FAST PATH 2: local hardware controls & screen note capture
+                val localAction = LocalQuickCommandMatcher.match(query)
+                if (localAction != null) {
+                    val execResult = actionExecutor.execute(
+                        action = localAction,
+                        activeProfilePackage = activePkg,
+                        beforeTap = { hideOverlayTemporarilyForTap() },
+                        afterTap = { restoreOverlayAfterTap() },
+                    )
+                    val replyText = execResult.detail.ifBlank { "${localAction.intent.displayLabel} tamamlandı." }
+                    val botMsgId = dao.insertMessage(
+                        ChatMessageEntity(
+                            isUser = false,
+                            text = replyText,
+                            intentWire = localAction.intent.wireValue,
+                            target = localAction.target,
+                            actionStatus = execResult.status.name,
+                            actionStatusDetail = execResult.detail,
+                            timestampMillis = System.currentTimeMillis(),
+                        )
+                    )
+                    overlayState.value = overlayState.value.copy(
+                        replyText = replyText,
+                        ttsSummary = replyText,
+                        actionDetail = "${execResult.detail} (0 token)",
+                        actionFailed = execResult.status == ActionExecutionStatus.FAILED,
+                        isProcessing = false,
+                    )
+                    if (overlayState.value.ttsEnabled && ttsReady) {
+                        tts?.speak(
+                            replyText,
+                            TextToSpeech.QUEUE_FLUSH,
+                            null,
+                            "jarvis_overlay_$botMsgId"
+                        )
+                    }
+                    if (
+                        execResult.status == ActionExecutionStatus.EXECUTED &&
+                        localAction.intent == ActionIntent.OPEN_SYSTEM_SETTINGS
+                    ) {
+                        autoCloseJob = serviceScope.launch {
+                            delay(850L)
+                            collapseOrStopOverlay()
+                        }
+                    }
+                    return@launch
+                }
+
                 // Otherwise route through Gemini (text-only saved label list)
                 val apps = actionExecutor.getInstalledLauncherApps()
                 val result = aiRepository.askJarvis(
@@ -742,15 +791,6 @@ class JarvisOverlayService : Service() {
                             isProcessing = false,
                         )
 
-                        if (overlayState.value.ttsEnabled && ttsReady) {
-                            tts?.speak(
-                                reply.ttsSummary,
-                                TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "jarvis_overlay_$insertedId"
-                            )
-                        }
-
                         if (action != null) {
                             val execResult = actionExecutor.execute(
                                 action = action,
@@ -763,10 +803,33 @@ class JarvisOverlayService : Service() {
                                 status = execResult.status.name,
                                 detail = execResult.detail,
                             )
+                            val displayReply = if (
+                                action.intent in setOf(
+                                    ActionIntent.BATTERY_STATUS,
+                                    ActionIntent.TORCH_CONTROL,
+                                    ActionIntent.VOLUME_CONTROL,
+                                    ActionIntent.CAPTURE_SCREEN_NOTE,
+                                ) && execResult.detail.isNotBlank()
+                            ) {
+                                execResult.detail
+                            } else {
+                                reply.text
+                            }
                             overlayState.value = overlayState.value.copy(
+                                replyText = displayReply,
+                                ttsSummary = displayReply,
                                 actionDetail = execResult.detail,
                                 actionFailed = execResult.status == ActionExecutionStatus.FAILED,
                             )
+
+                            if (overlayState.value.ttsEnabled && ttsReady) {
+                                tts?.speak(
+                                    displayReply,
+                                    TextToSpeech.QUEUE_FLUSH,
+                                    null,
+                                    "jarvis_overlay_$insertedId"
+                                )
+                            }
 
                             val shouldAutoClose = execResult.status == ActionExecutionStatus.EXECUTED &&
                                 action.intent in setOf(
@@ -775,6 +838,7 @@ class JarvisOverlayService : Service() {
                                     ActionIntent.SEARCH_YOUTUBE,
                                     ActionIntent.GO_HOME,
                                     ActionIntent.TAP_COORDINATE,
+                                    ActionIntent.OPEN_SYSTEM_SETTINGS,
                                 )
                             if (shouldAutoClose) {
                                 autoCloseJob = serviceScope.launch {
@@ -782,6 +846,13 @@ class JarvisOverlayService : Service() {
                                     collapseOrStopOverlay()
                                 }
                             }
+                        } else if (overlayState.value.ttsEnabled && ttsReady) {
+                            tts?.speak(
+                                reply.ttsSummary,
+                                TextToSpeech.QUEUE_FLUSH,
+                                null,
+                                "jarvis_overlay_$insertedId"
+                            )
                         }
                     },
                     onFailure = { err ->
@@ -1090,6 +1161,34 @@ class JarvisOverlayService : Service() {
         }
     }
 
+    private fun minimizeToFloatingBubble() {
+        autoCloseJob?.cancel()
+        voiceManager.stopListening()
+        removeExpandedOverlay()
+
+        if (Settings.canDrawOverlays(this)) {
+            if (!prefsSnapshot.floatingBubbleEnabled) {
+                prefsSnapshot = prefsSnapshot.copy(floatingBubbleEnabled = true)
+                serviceScope.launch {
+                    prefsRepo.setFloatingBubbleEnabled(true)
+                }
+            }
+            showBubble()
+            ensureForegroundNotification()
+        }
+
+        if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
+            wakeWordManager.resumeAfterVoiceSession()
+        }
+
+        if (!Settings.canDrawOverlays(this) &&
+            !prefsSnapshot.persistentTriggerEnabled &&
+            !prefsSnapshot.wakeWordEnabled
+        ) {
+            stopSelf()
+        }
+    }
+
     private fun collapseOrStopOverlay() {
         autoCloseJob?.cancel()
         voiceManager.stopListening()
@@ -1151,13 +1250,13 @@ class JarvisOverlayService : Service() {
             setContent {
                 val wakeActive by wakeWordIndicator.collectAsStateWithLifecycle()
                 Box(
-                    modifier = Modifier.size(58.dp),
+                    modifier = Modifier.size(56.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    // Minimal tactical Obsidian circle (no neon AI orb slop)
+                    // Minimal matte circle bubble (tap to re-open, drag to bottom dismiss zone to close)
                     Surface(
                         modifier = Modifier
-                            .size(46.dp)
+                            .size(48.dp)
                             .pointerInput(Unit) {
                                 detectDragGestures(
                                     onDragStart = {
@@ -1183,16 +1282,16 @@ class JarvisOverlayService : Service() {
                                         change.consume()
                                         bubbleParams?.let { lp ->
                                             lp.x = (lp.x + dragAmount.x.roundToInt())
-                                                .coerceIn(0, (screenW - (58 * density).roundToInt()).coerceAtLeast(0))
+                                                .coerceIn(0, (screenW - (56 * density).roundToInt()).coerceAtLeast(0))
                                             lp.y = (lp.y + dragAmount.y.roundToInt())
-                                                .coerceIn(0, (screenH - (58 * density).roundToInt()).coerceAtLeast(0))
+                                                .coerceIn(0, (screenH - (56 * density).roundToInt()).coerceAtLeast(0))
                                             try {
                                                 windowManager.updateViewLayout(this@apply, lp)
                                             } catch (_: Exception) {
                                             }
                                             val inDismissBand = lp.y > screenH * 0.74f &&
-                                                lp.x > screenW * 0.22f &&
-                                                lp.x < screenW * 0.78f
+                                                lp.x > screenW * 0.20f &&
+                                                lp.x < screenW * 0.80f
                                             isOverDismissZone.value = inDismissBand
                                         }
                                     }
@@ -1201,9 +1300,9 @@ class JarvisOverlayService : Service() {
                             .clip(CircleShape)
                             .clickable { showExpandedOverlay() },
                         shape = CircleShape,
-                        color = Color(0xEB11161F),
-                        border = BorderStroke(1.dp, Color(0x38E2E8F0)),
-                        shadowElevation = 8.dp,
+                        color = Color(0xF2101319),
+                        border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                        shadowElevation = 10.dp,
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             Icon(
@@ -1216,33 +1315,12 @@ class JarvisOverlayService : Service() {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .padding(8.dp)
+                                        .padding(9.dp)
                                         .size(6.dp)
                                         .clip(CircleShape)
                                         .background(JarvisEmerald)
                                 )
                             }
-                        }
-                    }
-
-                    // Direct 1-tap close badge on top-right corner of the floating bubble
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopEnd)
-                            .size(20.dp)
-                            .clip(CircleShape)
-                            .clickable { disableFloatingBubbleOnly() },
-                        shape = CircleShape,
-                        color = Color(0xF01E293B),
-                        border = BorderStroke(1.dp, Color(0x40FFFFFF)),
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "Baloncuğu kapat",
-                                tint = Color(0xFFE2E8F0),
-                                modifier = Modifier.size(12.dp),
-                            )
                         }
                     }
                 }
@@ -1602,12 +1680,12 @@ private fun OverlayCardContent(
     state: OverlayUiState,
     onMicToggle: () -> Unit,
     onSendText: (String) -> Unit,
+    onCaptureScreenNote: () -> Unit,
     onRecordPoint: () -> Unit,
     onCopyReply: () -> Unit,
     onToggleTts: () -> Unit,
     onOpenFullApp: () -> Unit,
     onClose: () -> Unit,
-    onDisableCompletely: () -> Unit,
 ) {
     var showTextField by remember { mutableStateOf(false) }
     var draftText by remember { mutableStateOf("") }
@@ -1615,26 +1693,26 @@ private fun OverlayCardContent(
     Surface(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp)
-            .widthIn(max = 540.dp),
-        shape = RoundedCornerShape(22.dp),
-        color = Color(0xFF0D1118),
-        border = BorderStroke(1.dp, Color(0xFF243041)),
+            .padding(horizontal = 16.dp)
+            .widthIn(max = 520.dp),
+        shape = RoundedCornerShape(24.dp),
+        color = Color(0xFF0E1218),
+        border = BorderStroke(1.dp, Color(0xFF232B38)),
         shadowElevation = 18.dp,
     ) {
         Column(
-            modifier = Modifier.padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Surface(
-                    modifier = Modifier.size(32.dp),
+                    modifier = Modifier.size(34.dp),
                     shape = CircleShape,
-                    color = Color(0xFF17202D),
-                    border = BorderStroke(1.dp, Color(0xFF334155)),
+                    color = Color(0xFF161C26),
+                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
                 ) {
                     Box(contentAlignment = Alignment.Center) {
                         Text(
@@ -1649,27 +1727,19 @@ private fun OverlayCardContent(
                     Text(
                         text = "JARVIS",
                         style = MaterialTheme.typography.titleMedium,
-                        color = Color(0xFFE6EEF8),
+                        color = Color(0xFFF1F5F9),
                     )
                     Text(
                         text = when {
                             state.isListening -> "Dinleniyor…"
-                            state.isProcessing -> "Düşünüyor…"
-                            state.activeProfileLabel.isNotBlank() -> "Profil: ${state.activeProfileLabel}"
-                            else -> "Hızlı Komut"
+                            state.isProcessing -> "İşleniyor…"
+                            state.activeProfileLabel.isNotBlank() -> state.activeProfileLabel
+                            else -> "Hazır"
                         },
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (state.isListening) JarvisCrimson else Color(0xFF94A3B8),
+                        color = if (state.isListening) JarvisCrimson else Color(0xFF8B97AA),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
-                    )
-                }
-
-                IconButton(onClick = onRecordPoint) {
-                    Icon(
-                        imageVector = Icons.Rounded.AddLocationAlt,
-                        contentDescription = stringResource(R.string.record_point),
-                        tint = JarvisAmber,
                     )
                 }
 
@@ -1677,7 +1747,8 @@ private fun OverlayCardContent(
                     Icon(
                         imageVector = Icons.Rounded.Keyboard,
                         contentDescription = "Yazarak komut ver",
-                        tint = if (showTextField) JarvisCyan else Color(0xFF94A3B8),
+                        tint = if (showTextField) JarvisCyan else Color(0xFF8B97AA),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
 
@@ -1689,23 +1760,17 @@ private fun OverlayCardContent(
                             Icons.AutoMirrored.Rounded.VolumeOff
                         },
                         contentDescription = "Sesli okuma aç veya kapat",
-                        tint = if (state.ttsEnabled) JarvisCyan else Color(0xFF94A3B8),
-                    )
-                }
-
-                IconButton(onClick = onDisableCompletely) {
-                    Icon(
-                        imageVector = Icons.Rounded.PowerSettingsNew,
-                        contentDescription = "Baloncuğu ve servisi tamamen kapat",
-                        tint = JarvisCrimson,
+                        tint = if (state.ttsEnabled) JarvisCyan else Color(0xFF8B97AA),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
 
                 IconButton(onClick = onClose) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
-                        contentDescription = stringResource(R.string.close_overlay),
-                        tint = Color(0xFF94A3B8),
+                        contentDescription = "Yüzen baloncuğa küçült",
+                        tint = Color(0xFFCBD5E1),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
             }
@@ -1714,18 +1779,19 @@ private fun OverlayCardContent(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF141D2B))
+                    .background(Color(0xFF151A23))
+                    .border(1.dp, Color(0xFF232B38), RoundedCornerShape(16.dp))
                     .padding(horizontal = 12.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 FilledIconButton(
                     onClick = onMicToggle,
-                    modifier = Modifier.size(46.dp),
+                    modifier = Modifier.size(48.dp),
                     shape = CircleShape,
                     colors = IconButtonDefaults.filledIconButtonColors(
                         containerColor = if (state.isListening) JarvisCrimson else JarvisCyan,
-                        contentColor = if (state.isListening) Color.White else Color(0xFF080B10),
+                        contentColor = if (state.isListening) Color.White else Color(0xFF090B0F),
                     ),
                 ) {
                     Icon(
@@ -1747,7 +1813,7 @@ private fun OverlayCardContent(
                             Text(
                                 text = state.partialText,
                                 style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFE6EEF8),
+                                color = Color(0xFFF1F5F9),
                                 maxLines = 2,
                                 overflow = TextOverflow.Ellipsis,
                             )
@@ -1772,9 +1838,9 @@ private fun OverlayCardContent(
                         }
                     } else {
                         Text(
-                            text = state.userText.ifBlank { "Konuş, yaz veya + simgesiyle ekrandan nokta kaydet." },
+                            text = state.userText.ifBlank { "Komut söyleyin veya aşağıdaki hızlı araçları kullanın." },
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (state.userText.isBlank()) Color(0xFF94A3B8) else Color(0xFFE6EEF8),
+                            color = if (state.userText.isBlank()) Color(0xFF8B97AA) else Color(0xFFF1F5F9),
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis,
                         )
@@ -1806,9 +1872,9 @@ private fun OverlayCardContent(
                         ),
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = JarvisCyan,
-                            unfocusedBorderColor = Color(0xFF283548),
-                            focusedTextColor = Color(0xFFE6EEF8),
-                            unfocusedTextColor = Color(0xFFE6EEF8),
+                            unfocusedBorderColor = Color(0xFF232B38),
+                            focusedTextColor = Color(0xFFF1F5F9),
+                            unfocusedTextColor = Color(0xFFF1F5F9),
                         ),
                     )
                     FilledIconButton(
@@ -1819,9 +1885,10 @@ private fun OverlayCardContent(
                             }
                         },
                         enabled = draftText.isNotBlank() && !state.isProcessing,
+                        modifier = Modifier.size(48.dp),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = JarvisAmber,
-                            contentColor = Color(0xFF080B10),
+                            containerColor = JarvisCyan,
+                            contentColor = Color(0xFF090B0F),
                         ),
                     ) {
                         Icon(
@@ -1835,7 +1902,8 @@ private fun OverlayCardContent(
             if (state.errorText != null) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = Color(0xFF4C0519),
+                    color = Color(0xFF3A0E1B),
+                    border = BorderStroke(1.dp, JarvisCrimson.copy(alpha = 0.4f)),
                 ) {
                     Text(
                         text = state.errorText,
@@ -1843,7 +1911,7 @@ private fun OverlayCardContent(
                         color = Color(0xFFFECDD3),
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(10.dp),
+                            .padding(12.dp),
                     )
                 }
             }
@@ -1851,13 +1919,13 @@ private fun OverlayCardContent(
             if (state.replyText.isNotBlank()) {
                 Surface(
                     shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFF141D2B),
-                    border = BorderStroke(1.dp, Color(0xFF283548)),
+                    color = Color(0xFF151A23),
+                    border = BorderStroke(1.dp, Color(0xFF232B38)),
                 ) {
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .heightIn(max = 220.dp)
+                            .heightIn(max = 200.dp)
                             .verticalScroll(rememberScrollState())
                             .padding(12.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp),
@@ -1865,10 +1933,10 @@ private fun OverlayCardContent(
                         Text(
                             text = state.replyText,
                             style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFE6EEF8),
+                            color = Color(0xFFF1F5F9),
                         )
 
-                        if (state.actionDetail.isNotBlank()) {
+                        if (state.actionDetail.isNotBlank() && state.actionDetail != state.replyText) {
                             Text(
                                 text = state.actionDetail,
                                 style = MaterialTheme.typography.labelMedium,
@@ -1880,63 +1948,80 @@ private fun OverlayCardContent(
             }
 
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 OutlinedButton(
-                    onClick = onCopyReply,
-                    enabled = state.replyText.isNotBlank(),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, JarvisCyan.copy(alpha = 0.5f)),
+                    onClick = onCaptureScreenNote,
+                    enabled = !state.isProcessing,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = JarvisCyan),
                 ) {
                     Icon(
-                        imageVector = if (state.copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        imageVector = Icons.Rounded.NoteAdd,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = if (state.copied) {
-                            stringResource(R.string.copied_feedback)
-                        } else {
-                            stringResource(R.string.copy_to_clipboard)
-                        },
-                        style = MaterialTheme.typography.labelSmall,
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Ekranı Not Al", style = MaterialTheme.typography.labelSmall)
+                }
+
+                OutlinedButton(
+                    onClick = onRecordPoint,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AddLocationAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(15.dp),
                     )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Nokta", style = MaterialTheme.typography.labelSmall)
+                }
+
+                if (state.replyText.isNotBlank()) {
+                    OutlinedButton(
+                        onClick = onCopyReply,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
+                    ) {
+                        Icon(
+                            imageVector = if (state.copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (state.copied) {
+                                stringResource(R.string.copied_feedback)
+                            } else {
+                                "Kopyala"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
                 }
 
                 OutlinedButton(
                     onClick = onOpenFullApp,
-                    modifier = Modifier.weight(1f),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, Color(0xFF334155)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFE6EEF8)),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF1F5F9)),
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
                         contentDescription = null,
                         modifier = Modifier.size(15.dp),
                     )
-                    Spacer(modifier = Modifier.width(5.dp))
-                    Text(
-                        text = stringResource(R.string.expand_fullscreen),
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-
-                TextButton(
-                    onClick = onClose,
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                ) {
-                    Text(
-                        text = stringResource(R.string.close_overlay),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = Color(0xFF94A3B8),
-                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Uygulama", style = MaterialTheme.typography.labelSmall)
                 }
             }
         }

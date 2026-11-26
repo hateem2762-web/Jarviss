@@ -1,10 +1,12 @@
 package com.example.ai
 
+import android.graphics.Bitmap
 import android.util.Log
 import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.system.ReminderDurationParser
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
 import com.google.firebase.ai.ai
@@ -39,6 +41,11 @@ data class WhatsAppEvaluation(
     val draftReply: String,
 )
 
+data class ScreenNoteAiResult(
+    val title: String,
+    val content: String,
+)
+
 class JarvisRepository {
 
     private val jarvisSchema = Schema.obj(
@@ -61,23 +68,28 @@ class JarvisRepository {
                     "set_reminder",
                     "go_home",
                     "tap_coordinate",
+                    "torch_control",
+                    "volume_control",
+                    "battery_status",
+                    "open_system_settings",
+                    "capture_screen_note",
                     "none"
                 ),
-                description = "Aksiyon niyeti. Ekrandaki kayıtlı bir noktaya dokunmak için 'tap_coordinate', metin yanıtları için 'none' ver."
+                description = "Aksiyon niyeti."
             ),
             "target" to Schema.string(
-                description = "open_app için uygulama adı, open_url için URL, search_youtube için arama sorgusu, tap_coordinate için kayıtlı etiket listesinden birebir eşleşen label; diğer durumlarda boş string."
+                description = "open_app için uygulama adı; open_url için URL; search_youtube için sorgu; tap_coordinate için kayıtlı etiket; torch_control için 'on'|'off'|'toggle'; volume_control için '<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>'; open_system_settings için 'wifi'|'bluetooth'|'sound'|'accessibility'|'notifications'|'battery'|'display'|'location'|'settings'; diğerlerinde boş string."
             ),
             "minutes" to Schema.integer(
-                description = "set_reminder için dakika sayısı. Kullanıcı SADECE saniye belirttiyse BURAYI null bırak!",
+                description = "set_reminder için kullanıcının istediği TAM dakika sayısı (ör. '3 dakika' -> 3, 'yarım saat' -> 30, '1 saat' -> 60). Kullanıcı SADECE saniye belirttiyse null bırak.",
                 nullable = true
             ),
             "seconds" to Schema.integer(
-                description = "set_reminder için saniye sayısı (örn: '10 saniye sonra' -> 10). Saniye yoksa null bırak.",
+                description = "set_reminder için saniye sayısı (ör. '10 saniye sonra' -> 10). Saniye yoksa null bırak.",
                 nullable = true
             ),
             "message" to Schema.string(
-                description = "set_reminder için hatırlatma metni veya aksiyon açıklaması; diğer durumlarda boş string."
+                description = "set_reminder için hatırlatma metni; diğer durumlarda boş string."
             ),
         ),
         optionalProperties = listOf("minutes", "seconds")
@@ -133,6 +145,30 @@ class JarvisRepository {
         )
     }
 
+    private val screenNoteSchema = Schema.obj(
+        properties = mapOf(
+            "title" to Schema.string(
+                description = "Not için 2-6 kelimelik kısa, açıklayıcı Türkçe başlık."
+            ),
+            "content" to Schema.string(
+                description = "Ekrandan okunan veya düzenlenen temiz, okunabilir, eksiksiz not metni."
+            ),
+        )
+    )
+
+    private val screenNoteConfig = generationConfig {
+        responseMimeType = "application/json"
+        responseSchema = screenNoteSchema
+        temperature = 0.2f
+    }
+
+    private val screenNoteModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = PRIMARY_MODEL,
+            generationConfig = screenNoteConfig,
+        )
+    }
+
     suspend fun askJarvis(
         userPrompt: String,
         userContext: String,
@@ -162,6 +198,7 @@ class JarvisRepository {
             modelProvider = { primaryModel },
             modelLabel = PRIMARY_MODEL,
             promptText = fullInput,
+            rawUserPrompt = userPrompt,
             timeoutMs = ATTEMPT_TIMEOUT_MS,
         )
 
@@ -176,6 +213,7 @@ class JarvisRepository {
                 modelProvider = { fallbackModel },
                 modelLabel = FALLBACK_MODEL,
                 promptText = fullInput,
+                rawUserPrompt = userPrompt,
                 timeoutMs = ATTEMPT_TIMEOUT_MS,
             )
             return@withContext fallbackResult.fold(
@@ -219,6 +257,7 @@ class JarvisRepository {
         modelProvider: () -> GenerativeModel,
         modelLabel: String,
         promptText: String,
+        rawUserPrompt: String,
         timeoutMs: Long,
     ): Result<JarvisAiReply> {
         val startMs = System.currentTimeMillis()
@@ -246,7 +285,7 @@ class JarvisRepository {
             }
 
             Log.d(TAG, "$modelLabel completed in ${System.currentTimeMillis() - startMs}ms")
-            Result.success(parseStructuredJson(rawJson))
+            Result.success(parseStructuredJson(rawJson, rawUserPrompt))
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "JARVIS inference timed out on $modelLabel after ${timeoutMs}ms", e)
             Result.failure(e)
@@ -258,27 +297,36 @@ class JarvisRepository {
         }
     }
 
-    private fun parseStructuredJson(rawJson: String): JarvisAiReply {
+    private fun parseStructuredJson(rawJson: String, rawUserPrompt: String): JarvisAiReply {
         val json = JSONObject(rawJson)
         val mode = json.optString("mode", "answer").lowercase(Locale.ROOT)
-        val reply = json.optString("reply", "").trim()
-        val ttsSummary = json.optString("ttsSummary", "").trim()
+        var reply = json.optString("reply", "").trim()
+        var ttsSummary = json.optString("ttsSummary", "").trim()
         val intent = ActionIntent.fromWire(json.optString("intent", "none"))
         val target = json.optString("target", "").let {
             if (it == "null") "" else it.trim()
         }
-        val minutes = if (json.has("minutes") && !json.isNull("minutes")) {
+        var minutes = if (json.has("minutes") && !json.isNull("minutes")) {
             json.optInt("minutes").takeIf { it > 0 }
         } else {
             null
         }
-        val seconds = if (json.has("seconds") && !json.isNull("seconds")) {
+        var seconds = if (json.has("seconds") && !json.isNull("seconds")) {
             json.optInt("seconds").takeIf { it > 0 }
         } else {
             null
         }
         val message = json.optString("message", "").let {
             if (it == "null") "" else it.trim()
+        }
+
+        // Deterministic guard for reminder durations so user's exact requested minutes/seconds/hours are never replaced by 10m fallback
+        if (intent == ActionIntent.SET_REMINDER) {
+            val parsedDuration = ReminderDurationParser.parse(rawUserPrompt)
+            if (parsedDuration != null && parsedDuration.totalMillis > 0L) {
+                minutes = parsedDuration.minutes
+                seconds = parsedDuration.seconds
+            }
         }
 
         val action = if (mode == "action" && intent != ActionIntent.NONE) {
@@ -291,6 +339,19 @@ class JarvisRepository {
             )
         } else {
             null
+        }
+
+        if (action != null && action.intent == ActionIntent.SET_REMINDER) {
+            val label = action.formattedDurationLabel()
+            val reminderText = action.message.ifBlank { action.target }
+            if (reply.isBlank() || (minutes != 10 && reply.contains("10 dakika"))) {
+                reply = if (reminderText.isNotBlank()) {
+                    "$label sonrası için hatırlatıcı kuruldu: \"$reminderText\""
+                } else {
+                    "$label sonrası için hatırlatıcı kuruldu."
+                }
+                ttsSummary = reply
+            }
         }
 
         val finalReply = reply.ifBlank {
@@ -336,9 +397,21 @@ class JarvisRepository {
             3. Sesle yazıya çevrilmiş metinlerdeki ufak yazım/noktalama hatalarını mantıksal olarak doğru tahmin et.
             4. Bilmediğin veya kesin olmayan bir şeyi uydurma; eksik bilgi varsa tek ve net bir soruyla sor.
 
-            HATIRLATICI SÜRE KURALI:
-            - Kullanıcı saniye belirtirse (ör. "10 saniye sonra") minutes=null, seconds=10 ver! Saniyeyi dakikaya çevirme.
-            - Kullanıcı dakika belirtirse minutes=5, seconds=null ver. Süre yoksa minutes=10, seconds=null ver.
+            HATIRLATICI SÜRE KURALI (ÇOK ÖNEMLİ):
+            - Kullanıcının belirttiği TAM süreyi çıkar; ASLA kafandan 10 dakikaya yuvarlama!
+            - Saniye belirtirse (ör. "20 saniye sonra") minutes=null, seconds=20 ver.
+            - Dakika belirtirse (ör. "3 dakika sonra", "15 dk") minutes=3 veya 15, seconds=null ver.
+            - Saat belirtirse dakikaya çevir ("yarım saat" -> minutes=30, "1 saat" -> minutes=60, "1.5 saat" -> minutes=90).
+            - Saat formatı verirse (ör. "saat 16:30'da") güncel saatten kalan dakikayı hesapla.
+            - Sadece kullanıcı hiçbir süre vermediyse minutes=10 ver.
+
+            DONANIM VE SİSTEM KONTROL KURALLARI:
+            - Fener aç/kapat: intent="torch_control", target="on" | "off" | "toggle"
+            - Ses seviyesi: intent="volume_control", target="<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>"
+              Örn: "medya sesini kıs" -> "media:down", "sesi %60 yap" -> "media:set:60", "telefonu sessize al" -> "ring:mute", "titreşime al" -> "ring:vibrate"
+            - Şarj / pil durumu: intent="battery_status", target=""
+            - Sistem ayarları aç (Wi-Fi, Bluetooth, Ses, Erişilebilirlik, Bildirim, Pil, Konum, Ekran): intent="open_system_settings", target="wifi"|"bluetooth"|"sound"|"accessibility"|"notifications"|"battery"|"location"|"display"|"settings"
+            - Ekranı not al ("bu ekranı not al", "şu ekranı kaydet", "bunu not defterine kaydet"): intent="capture_screen_note", target=""
 
             EKRAN NOKTASI TIKLAMA KURALI:
             - Kullanıcı ekrandaki bir butona/sekmeye tıklamak, basmak veya girmek istiyorsa ve yukarıdaki KAYITLI DOKUNMA ETİKETLERİ listesinde karşılık gelen bir etiket varsa mode="action", intent="tap_coordinate", target="<listeden birebir etiket>" seç!
@@ -349,9 +422,65 @@ class JarvisRepository {
             KULLANICI BAĞLAMI: $contextSection
 
             ÇIKTI MODLARI:
-            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home veya tap_coordinate niyeti varsa mode="action", reply alanına tek satır onay yaz.
+            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings veya capture_screen_note niyeti varsa mode="action", reply alanına tek satır onay yaz.
             - MOD 2 (mode="answer"): Bilgi sorusu, özet, metin üretimi veya sohbetse mode="answer", intent="none" seç.
         """.trimIndent()
+    }
+
+    suspend fun generateNoteFromScreen(
+        extractedText: String,
+        screenshot: Bitmap?,
+        sourceAppName: String,
+    ): Result<ScreenNoteAiResult> = withContext(Dispatchers.IO) {
+        val cleanedText = extractedText.trim()
+        val prompt = buildString {
+            appendLine("Kullanıcı mevcut telefon ekranını JARVIS Not Defteri'ne kaydetmek istiyor.")
+            appendLine("Kaynak Uygulama: ${sourceAppName.ifBlank { "Bilinmiyor" }}")
+            appendLine("Görevlerin:")
+            appendLine("1. Ekrandaki en önemli bilgileri, mesajları, başlıkları, fiyatları, tarihleri veya metni temiz ve okunaklı biçimde çıkar.")
+            appendLine("2. Kısa ve anlamlı bir Türkçe başlık (title) üret.")
+            appendLine("3. Eğer ekran görüntüsü verildiyse görseldeki metni de (OCR) oku; gereksiz sistem ikon yazılarını (pil, saat vb.) dahil etme.")
+            if (cleanedText.isNotBlank()) {
+                appendLine()
+                appendLine("ERİŞİLEBİLİRLİK METNİ:")
+                appendLine(cleanedText.take(4_500))
+            }
+        }
+
+        try {
+            val accumulated = StringBuilder()
+            withTimeout(ATTEMPT_TIMEOUT_MS) {
+                screenNoteModel.generateContentStream(
+                    content {
+                        if (screenshot != null) {
+                            image(screenshot)
+                        }
+                        text(prompt)
+                    }
+                ).collect { chunk ->
+                    val chunkText = chunk.text.orEmpty()
+                    if (chunkText.isNotEmpty()) {
+                        accumulated.append(chunkText)
+                    }
+                }
+            }
+
+            val raw = accumulated.toString().trim()
+            if (raw.isBlank()) {
+                return@withContext Result.failure(IllegalStateException("Ekran notu üretilemedi."))
+            }
+            val json = JSONObject(raw)
+            val title = json.optString("title", "").trim()
+                .ifBlank { "${sourceAppName.ifBlank { "Ekran" }} Notu" }
+            val noteContent = json.optString("content", "").trim()
+                .ifBlank { cleanedText }
+            Result.success(ScreenNoteAiResult(title = title, content = noteContent))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "generateNoteFromScreen failed", e)
+            Result.failure(Exception(formatAiError(e)))
+        }
     }
 
     suspend fun evaluateWhatsAppMessage(

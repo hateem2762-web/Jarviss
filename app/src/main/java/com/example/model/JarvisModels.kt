@@ -2,6 +2,7 @@ package com.example.model
 
 enum class JarvisDestination {
     ASSISTANT,
+    NOTES,
     COORDINATES,
     REMINDERS,
     SETTINGS,
@@ -14,6 +15,11 @@ enum class ActionIntent(val wireValue: String, val displayLabel: String) {
     SET_REMINDER("set_reminder", "Hatırlatıcı Kur"),
     GO_HOME("go_home", "Ana Ekrana Dön"),
     TAP_COORDINATE("tap_coordinate", "Koordinata Dokun"),
+    TORCH_CONTROL("torch_control", "Fener Kontrolü"),
+    VOLUME_CONTROL("volume_control", "Ses Kontrolü"),
+    BATTERY_STATUS("battery_status", "Pil Durumu"),
+    OPEN_SYSTEM_SETTINGS("open_system_settings", "Sistem Ayarı"),
+    CAPTURE_SCREEN_NOTE("capture_screen_note", "Ekranı Not Al"),
     NONE("none", "Yanıt");
 
     companion object {
@@ -51,6 +57,8 @@ data class JarvisAction(
         val mins = (minutes ?: 0).coerceAtLeast(0)
         val secs = (seconds ?: 0).coerceAtLeast(0)
         return when {
+            mins >= 60 && mins % 60 == 0 && secs == 0 -> "${mins / 60} sa"
+            mins >= 60 && secs == 0 -> "${mins / 60} sa ${mins % 60} dk"
             mins > 0 && secs > 0 -> "$mins dk $secs sn"
             mins > 0 -> "$mins dk"
             secs > 0 -> "$secs sn"
@@ -137,4 +145,15 @@ data class ProactiveAlertItem(
     val messageTimestampMillis: Long,
     val createdAtMillis: Long,
     val isDismissed: Boolean = false,
+)
+
+data class NoteItem(
+    val id: Long,
+    val title: String,
+    val content: String,
+    val sourcePackage: String,
+    val sourceAppName: String,
+    val screenshotPath: String = "",
+    val createdAtMillis: Long,
+    val updatedAtMillis: Long,
 )

@@ -3,13 +3,16 @@ package com.example.system
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.AlarmClock
 import android.util.Log
 import com.example.accessibility.JarvisAccessibilityService
+import com.example.ai.JarvisRepository
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDao
+import com.example.data.local.NoteJsonStore
 import com.example.data.local.ReminderEntity
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
@@ -31,8 +34,11 @@ data class ActionExecutionResult(
 class JarvisActionExecutor(
     private val context: Context,
     private val dao: JarvisDao,
+    private val aiRepository: JarvisRepository = JarvisRepository(),
 ) {
     private val coordinateStore = CoordinateJsonStore(context, dao)
+    private val noteStore = NoteJsonStore(context, dao)
+    private val deviceControl = DeviceControlManager(context)
 
     suspend fun getInstalledLauncherApps(): List<InstalledAppInfo> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
@@ -132,10 +138,100 @@ class JarvisActionExecutor(
                 beforeTap = beforeTap,
                 afterTap = afterTap,
             )
+            ActionIntent.TORCH_CONTROL -> deviceControl.controlFlashlight(action.target)
+            ActionIntent.VOLUME_CONTROL -> deviceControl.controlVolume(action.target)
+            ActionIntent.BATTERY_STATUS -> deviceControl.getBatteryStatusSummary()
+            ActionIntent.OPEN_SYSTEM_SETTINGS -> deviceControl.openSystemSettings(action.target)
+            ActionIntent.CAPTURE_SCREEN_NOTE -> executeCaptureScreenNote(
+                beforeCapture = beforeTap,
+                afterCapture = afterTap,
+            )
             ActionIntent.NONE -> ActionExecutionResult(
                 status = ActionExecutionStatus.EXECUTED,
                 detail = ""
             )
+        }
+    }
+
+    suspend fun executeCaptureScreenNote(
+        beforeCapture: (suspend () -> Unit)? = null,
+        afterCapture: (suspend () -> Unit)? = null,
+    ): ActionExecutionResult {
+        val service = JarvisAccessibilityService.getInstance()
+        if (service == null) {
+            return ActionExecutionResult(
+                status = ActionExecutionStatus.FAILED,
+                detail = "Ekranı okuyabilmek için Ayarlar'dan 'JARVIS Dokunma Asistanı' erişilebilirlik servisini açmalısın."
+            )
+        }
+
+        var capturedBitmap: Bitmap? = null
+        return try {
+            beforeCapture?.invoke()
+            delay(170L)
+
+            val capturedText = service.extractVisibleScreenText()
+            val needsOcrScreenshot = capturedText.text.length < 40
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                capturedBitmap = service.captureScreenBitmap()
+            }
+
+            afterCapture?.invoke()
+
+            val sourcePkg = capturedText.sourcePackage
+                .ifBlank { JarvisAccessibilityService.currentForegroundPackage.value.orEmpty() }
+            val sourceAppName = if (sourcePkg.isNotBlank()) {
+                resolveAppDisplayName(sourcePkg)
+            } else {
+                "Ekran"
+            }
+
+            if (capturedText.text.isBlank() && capturedBitmap == null) {
+                return ActionExecutionResult(
+                    status = ActionExecutionStatus.FAILED,
+                    detail = "Bu ekrandan okunabilir metin veya görüntü alınamadı (korumalı içerik olabilir)."
+                )
+            }
+
+            val aiResult = if (needsOcrScreenshot || capturedText.text.length >= 20) {
+                aiRepository.generateNoteFromScreen(
+                    extractedText = capturedText.text,
+                    screenshot = if (needsOcrScreenshot) capturedBitmap else null,
+                    sourceAppName = sourceAppName,
+                ).getOrNull()
+            } else {
+                null
+            }
+
+            val finalTitle = aiResult?.title?.takeIf { it.isNotBlank() }
+                ?: "$sourceAppName Ekran Notu"
+            val finalContent = aiResult?.content?.takeIf { it.isNotBlank() }
+                ?: capturedText.text.ifBlank { "Ekran görüntüsü kaydedildi." }
+
+            noteStore.saveNote(
+                title = finalTitle,
+                content = finalContent,
+                sourcePackage = sourcePkg,
+                sourceAppName = sourceAppName,
+                screenshotBitmap = capturedBitmap,
+            )
+
+            ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "Not Defteri'ne kaydedildi: \"$finalTitle\" ($sourceAppName)"
+            )
+        } catch (e: Exception) {
+            afterCapture?.invoke()
+            Log.e(TAG, "Screen note capture failed", e)
+            ActionExecutionResult(
+                status = ActionExecutionStatus.FAILED,
+                detail = "Ekran notu alınamadı: ${e.localizedMessage ?: "hata"}"
+            )
+        } finally {
+            try {
+                capturedBitmap?.recycle()
+            } catch (_: Exception) {
+            }
         }
     }
 

@@ -13,6 +13,8 @@ import com.example.ai.JarvisRepository
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
+import com.example.data.local.NoteEntity
+import com.example.data.local.NoteJsonStore
 import com.example.data.local.ProactiveAlertEntity
 import com.example.data.local.ReminderEntity
 import com.example.data.local.TapCoordinateEntity
@@ -24,6 +26,7 @@ import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.NoteItem
 import com.example.model.ProactiveAlertItem
 import com.example.model.ReminderItem
 import com.example.model.TapCoordinateItem
@@ -32,6 +35,7 @@ import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
+import com.example.system.LocalQuickCommandMatcher
 import com.example.system.ReminderScheduler
 import com.example.system.VoiceInputManager
 import com.example.system.VoiceInputState
@@ -52,6 +56,7 @@ data class JarvisUiState(
     val reminders: List<ReminderItem> = emptyList(),
     val coordinates: List<TapCoordinateItem> = emptyList(),
     val proactiveAlerts: List<ProactiveAlertItem> = emptyList(),
+    val notes: List<NoteItem> = emptyList(),
     val preferences: JarvisPreferences = JarvisPreferences(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
     val voiceState: VoiceInputState = VoiceInputState(),
@@ -69,10 +74,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     private val dao = JarvisDatabase.getInstance(application).jarvisDao()
     private val coordinateStore = CoordinateJsonStore(application, dao)
+    private val noteStore = NoteJsonStore(application, dao)
     private val prefsRepo = UserPreferencesRepository(application)
-    private val actionExecutor = JarvisActionExecutor(application, dao)
-    private val voiceManager = VoiceInputManager(application)
     private val aiRepository = JarvisRepository()
+    private val actionExecutor = JarvisActionExecutor(application, dao, aiRepository)
+    private val voiceManager = VoiceInputManager(application)
 
     private val installedAppsFlow = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     private val isProcessingFlow = MutableStateFlow(false)
@@ -89,6 +95,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val reminders: List<ReminderEntity>,
         val coordinates: List<TapCoordinateEntity>,
         val proactiveAlerts: List<ProactiveAlertEntity>,
+        val notes: List<NoteEntity>,
         val preferences: JarvisPreferences,
     )
 
@@ -107,18 +114,24 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val toast: String?,
     )
 
+    private val prefsAndNotesFlow: Flow<Pair<JarvisPreferences, List<NoteEntity>>> = combine(
+        prefsRepo.preferences,
+        dao.observeNotes(),
+    ) { prefs, notes -> prefs to notes }
+
     private val persistentFlow: Flow<PersistentSnapshot> = combine(
         dao.observeMessages(),
         dao.observeReminders(),
         dao.observeCoordinates(),
         dao.observeActiveProactiveAlerts(),
-        prefsRepo.preferences,
-    ) { msgEntities, remEntities, coordEntities, alertEntities, prefs ->
+        prefsAndNotesFlow,
+    ) { msgEntities, remEntities, coordEntities, alertEntities, (prefs, noteEntities) ->
         PersistentSnapshot(
             messages = msgEntities,
             reminders = remEntities,
             coordinates = coordEntities,
             proactiveAlerts = alertEntities,
+            notes = noteEntities,
             preferences = prefs,
         )
     }
@@ -186,6 +199,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             },
             coordinates = persistent.coordinates.map { it.toDomain() },
             proactiveAlerts = persistent.proactiveAlerts.map { it.toProactiveDomain() },
+            notes = persistent.notes.map { it.toDomain() },
             preferences = persistent.preferences,
             installedApps = runtime.apps,
             voiceState = runtime.voice,
@@ -311,7 +325,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 )
                 val activeCoordinates = coordinateStore.getCoordinatesForActiveOrFallback(activeProfilePkg)
 
-                // 0-Token Fast Path: match saved coordinate label locally before calling Gemini
+                // 0-Token Fast Path 1: saved screen coordinate
                 val zeroTokenMatch = CoordinateMatcher.findZeroTokenMatch(text, activeCoordinates)
                 if (zeroTokenMatch != null) {
                     val execResult = actionExecutor.executeTapOnCoordinate(zeroTokenMatch)
@@ -331,15 +345,30 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             timestampMillis = System.currentTimeMillis(),
                         )
                     )
-                    if (snapshotPrefs.speakReplies && ttsReady) {
-                        speakingMessageIdFlow.value = insertedId
-                        tts?.speak(
-                            replyText,
-                            TextToSpeech.QUEUE_FLUSH,
-                            null,
-                            "jarvis_$insertedId"
+                    speakIfEnabled(snapshotPrefs.speakReplies, insertedId, replyText)
+                    return@launch
+                }
+
+                // 0-Token Fast Path 2: unambiguous local device/screen-note commands
+                val localAction = LocalQuickCommandMatcher.match(text)
+                if (localAction != null) {
+                    val execResult = actionExecutor.execute(
+                        action = localAction,
+                        activeProfilePackage = activeProfilePkg,
+                    )
+                    val replyText = execResult.detail.ifBlank { "${localAction.intent.displayLabel} tamamlandı." }
+                    val insertedId = dao.insertMessage(
+                        ChatMessageEntity(
+                            isUser = false,
+                            text = replyText,
+                            intentWire = localAction.intent.wireValue,
+                            target = localAction.target,
+                            actionStatus = execResult.status.name,
+                            actionStatusDetail = execResult.detail,
+                            timestampMillis = System.currentTimeMillis(),
                         )
-                    }
+                    )
+                    speakIfEnabled(snapshotPrefs.speakReplies, insertedId, replyText)
                     return@launch
                 }
 
@@ -369,16 +398,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         )
 
-                        if (snapshotPrefs.speakReplies && ttsReady) {
-                            speakingMessageIdFlow.value = insertedId
-                            tts?.speak(
-                                reply.ttsSummary,
-                                TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "jarvis_$insertedId"
-                            )
-                        }
-
+                        var spokenText = reply.ttsSummary
                         if (action != null && snapshotPrefs.autoExecuteActions) {
                             val execResult = actionExecutor.execute(
                                 action = action,
@@ -389,7 +409,19 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 status = execResult.status.name,
                                 detail = execResult.detail,
                             )
+                            if (
+                                action.intent == ActionIntent.BATTERY_STATUS ||
+                                action.intent == ActionIntent.TORCH_CONTROL ||
+                                action.intent == ActionIntent.VOLUME_CONTROL ||
+                                action.intent == ActionIntent.CAPTURE_SCREEN_NOTE
+                            ) {
+                                if (execResult.detail.isNotBlank()) {
+                                    spokenText = execResult.detail
+                                }
+                            }
                         }
+
+                        speakIfEnabled(snapshotPrefs.speakReplies, insertedId, spokenText)
                     },
                     onFailure = { throwable ->
                         Log.e(TAG, "askJarvis failed", throwable)
@@ -408,6 +440,18 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             } finally {
                 isProcessingFlow.value = false
             }
+        }
+    }
+
+    private fun speakIfEnabled(enabled: Boolean, messageId: Long, text: String) {
+        if (enabled && ttsReady && text.isNotBlank()) {
+            speakingMessageIdFlow.value = messageId
+            tts?.speak(
+                text,
+                TextToSpeech.QUEUE_FLUSH,
+                null,
+                "jarvis_$messageId"
+            )
         }
     }
 
@@ -430,6 +474,36 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             if (execResult.detail.isNotBlank()) {
                 toastFlow.value = execResult.detail
             }
+        }
+    }
+
+    // ---- Notes ("Not Defteri") ----
+
+    fun addManualNote(title: String, content: String) {
+        if (title.isBlank() && content.isBlank()) return
+        viewModelScope.launch {
+            noteStore.saveNote(
+                title = title.trim().ifBlank { "Hızlı Not" },
+                content = content.trim(),
+                sourcePackage = getApplication<Application>().packageName,
+                sourceAppName = "Manuel Not",
+                screenshotBitmap = null,
+            )
+            toastFlow.value = "Not Defteri'ne kaydedildi."
+        }
+    }
+
+    fun updateNote(id: Long, title: String, content: String) {
+        viewModelScope.launch {
+            noteStore.updateNote(id = id, title = title, content = content)
+            toastFlow.value = "Not güncellendi."
+        }
+    }
+
+    fun deleteNote(id: Long) {
+        viewModelScope.launch {
+            noteStore.deleteNote(id)
+            toastFlow.value = "Not silindi."
         }
     }
 

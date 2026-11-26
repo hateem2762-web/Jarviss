@@ -14,7 +14,7 @@ private val JarvisDarkColorScheme = darkColorScheme(
     primary = JarvisCyan,
     onPrimary = ObsidianBackground,
     primaryContainer = JarvisCyanDeep,
-    onPrimaryContainer = Color(0xFFA5F3FC),
+    onPrimaryContainer = Color(0xFFBAE6FD),
     secondary = JarvisAmber,
     onSecondary = ObsidianBackground,
     secondaryContainer = JarvisAmberDeep,
@@ -34,7 +34,7 @@ private val JarvisDarkColorScheme = darkColorScheme(
     surfaceVariant = ObsidianSurfaceVariant,
     onSurfaceVariant = ObsidianOnSurfaceMuted,
     outline = ObsidianOutline,
-    outlineVariant = Color(0xFF1E293B),
+    outlineVariant = Color(0xFF1D2430),
 )
 
 private val JarvisLightColorScheme = lightColorScheme(
@@ -68,8 +68,8 @@ val JarvisShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
     small = RoundedCornerShape(12.dp),
     medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(22.dp),
-    extraLarge = RoundedCornerShape(28.dp),
+    large = RoundedCornerShape(20.dp),
+    extraLarge = RoundedCornerShape(26.dp),
 )
 
 @Composable

@@ -9,7 +9,6 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,7 +20,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,23 +27,27 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Launch
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Alarm
+import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.AssistChip
-import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -62,12 +64,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -104,36 +103,29 @@ fun JarvisTopHudBar(
         else -> JarvisEmerald
     }
 
-    Surface(
-        modifier = modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-        tonalElevation = 2.dp,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.background),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 10.dp),
+                .padding(horizontal = 20.dp, vertical = 14.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Box(
                 modifier = Modifier
-                    .size(40.dp)
+                    .size(36.dp)
                     .clip(CircleShape)
-                    .border(
-                        width = 1.5.dp,
-                        brush = Brush.linearGradient(
-                            listOf(MaterialTheme.colorScheme.primary, MaterialTheme.colorScheme.secondary)
-                        ),
-                        shape = CircleShape,
-                    ),
+                    .background(MaterialTheme.colorScheme.surfaceVariant)
+                    .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
-                Image(
-                    painter = painterResource(id = R.drawable.img_jarvis_core),
-                    contentDescription = stringResource(R.string.cd_jarvis_core),
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
+                Text(
+                    text = "J",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
                 )
             }
 
@@ -151,7 +143,7 @@ fun JarvisTopHudBar(
                 ) {
                     Box(
                         modifier = Modifier
-                            .size(8.dp)
+                            .size(7.dp)
                             .clip(CircleShape)
                             .background(statusColor)
                     )
@@ -163,41 +155,43 @@ fun JarvisTopHudBar(
                 }
             }
 
-            AssistChip(
-                onClick = onContextClick,
+            Surface(
+                shape = RoundedCornerShape(10.dp),
+                color = if (hasUserContext) {
+                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f)
+                } else {
+                    MaterialTheme.colorScheme.surface
+                },
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
                 modifier = Modifier
                     .minimumInteractiveComponentSize()
+                    .clip(RoundedCornerShape(10.dp))
+                    .clickable(onClick = onContextClick)
                     .testTag("hud_context_chip"),
-                label = {
-                    Text(
-                        text = if (hasUserContext) "Bağlam Aktif" else "Bağlam Ekle",
-                        style = MaterialTheme.typography.labelSmall,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                },
-                leadingIcon = {
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Tune,
                         contentDescription = null,
-                        modifier = Modifier.size(16.dp),
+                        tint = if (hasUserContext) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(15.dp),
                     )
-                },
-                colors = AssistChipDefaults.assistChipColors(
-                    containerColor = if (hasUserContext) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                    },
-                    labelColor = if (hasUserContext) {
-                        MaterialTheme.colorScheme.onPrimaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    },
-                ),
-            )
+                    Text(
+                        text = if (hasUserContext) "Bağlam" else "Ayar",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
 
             if (hasMessages) {
+                Spacer(modifier = Modifier.width(4.dp))
                 IconButton(
                     onClick = onClearChat,
                     modifier = Modifier
@@ -212,6 +206,7 @@ fun JarvisTopHudBar(
                 }
             }
         }
+        HorizontalDivider(thickness = 1.dp, color = MaterialTheme.colorScheme.outlineVariant)
     }
 }
 
@@ -225,7 +220,7 @@ fun VoiceOrbButton(
     val infiniteTransition = rememberInfiniteTransition(label = "voice_orb")
     val pulse by infiniteTransition.animateFloat(
         initialValue = 1f,
-        targetValue = 1.32f,
+        targetValue = 1.28f,
         animationSpec = infiniteRepeatable(
             animation = tween(durationMillis = 750, easing = FastOutSlowInEasing),
             repeatMode = RepeatMode.Reverse,
@@ -234,20 +229,20 @@ fun VoiceOrbButton(
     )
 
     val ringScale = if (isListening) {
-        (pulse + rmsLevel * 0.25f).coerceAtMost(1.5f)
+        (pulse + rmsLevel * 0.22f).coerceAtMost(1.45f)
     } else {
         1f
     }
 
     Box(
-        modifier = modifier.size(64.dp),
+        modifier = modifier.size(56.dp),
         contentAlignment = Alignment.Center,
     ) {
         if (isListening) {
             Canvas(modifier = Modifier.fillMaxSize()) {
                 val radius = (size.minDimension / 2f) * (0.72f * ringScale)
                 drawCircle(
-                    color = JarvisCrimson.copy(alpha = 0.28f),
+                    color = JarvisCrimson.copy(alpha = 0.24f),
                     radius = radius.coerceAtMost(size.minDimension / 2f),
                 )
             }
@@ -256,7 +251,7 @@ fun VoiceOrbButton(
         FilledIconButton(
             onClick = onClick,
             modifier = Modifier
-                .size(52.dp)
+                .size(48.dp)
                 .testTag("voice_orb_button"),
             shape = CircleShape,
             colors = IconButtonDefaults.filledIconButtonColors(
@@ -267,7 +262,7 @@ fun VoiceOrbButton(
             Icon(
                 imageVector = if (isListening) Icons.Rounded.Stop else Icons.Rounded.Mic,
                 contentDescription = stringResource(R.string.cd_voice_input),
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(22.dp),
             )
         }
     }
@@ -291,10 +286,10 @@ fun ActionDispatchCard(
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.72f),
+        color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
         border = BorderStroke(
             width = 1.dp,
-            color = statusColor.copy(alpha = 0.45f),
+            color = MaterialTheme.colorScheme.outlineVariant,
         ),
     ) {
         Column(
@@ -314,7 +309,7 @@ fun ActionDispatchCard(
                         imageVector = action.intent.icon(),
                         contentDescription = null,
                         tint = MaterialTheme.colorScheme.primary,
-                        modifier = Modifier.size(18.dp),
+                        modifier = Modifier.size(17.dp),
                     )
                     Text(
                         text = action.intent.displayLabel,
@@ -325,7 +320,7 @@ fun ActionDispatchCard(
 
                 Surface(
                     shape = RoundedCornerShape(8.dp),
-                    color = statusColor.copy(alpha = 0.16f),
+                    color = statusColor.copy(alpha = 0.14f),
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -340,7 +335,7 @@ fun ActionDispatchCard(
                             },
                             contentDescription = null,
                             tint = statusColor,
-                            modifier = Modifier.size(14.dp),
+                            modifier = Modifier.size(13.dp),
                         )
                         Text(
                             text = statusLabel,
@@ -367,14 +362,14 @@ fun ActionDispatchCard(
                 )
             }
 
-            if (message.actionStatusDetail.isNotBlank()) {
+            if (message.actionStatusDetail.isNotBlank() && message.actionStatusDetail != message.text) {
                 Text(
                     text = message.actionStatusDetail,
                     style = MaterialTheme.typography.bodySmall,
                     color = if (message.actionStatus == ActionExecutionStatus.FAILED) {
                         JarvisCrimson
                     } else {
-                        MaterialTheme.colorScheme.onSurface
+                        MaterialTheme.colorScheme.onSurfaceVariant
                     },
                 )
             }
@@ -389,12 +384,12 @@ fun ActionDispatchCard(
                         .minimumInteractiveComponentSize()
                         .testTag("action_run_button_${message.id}"),
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.PlayArrow,
                         contentDescription = null,
-                        modifier = Modifier.size(16.dp),
+                        modifier = Modifier.size(15.dp),
                     )
                     Spacer(modifier = Modifier.width(4.dp))
                     Text(
@@ -403,7 +398,7 @@ fun ActionDispatchCard(
                         } else {
                             stringResource(R.string.action_rerun)
                         },
-                        style = MaterialTheme.typography.labelMedium,
+                        style = MaterialTheme.typography.labelSmall,
                     )
                 }
 
@@ -426,7 +421,7 @@ fun ActionDispatchCard(
                             imageVector = Icons.Rounded.Code,
                             contentDescription = null,
                             tint = JarvisCyan,
-                            modifier = Modifier.size(15.dp),
+                            modifier = Modifier.size(14.dp),
                         )
                         Text(
                             text = stringResource(R.string.action_show_json),
@@ -464,5 +459,10 @@ private fun ActionIntent.icon(): ImageVector = when (this) {
     ActionIntent.SET_REMINDER -> Icons.Rounded.Alarm
     ActionIntent.GO_HOME -> Icons.Rounded.Home
     ActionIntent.TAP_COORDINATE -> Icons.Rounded.TouchApp
+    ActionIntent.TORCH_CONTROL -> Icons.Rounded.FlashlightOn
+    ActionIntent.VOLUME_CONTROL -> Icons.AutoMirrored.Rounded.VolumeUp
+    ActionIntent.BATTERY_STATUS -> Icons.Rounded.BatteryChargingFull
+    ActionIntent.OPEN_SYSTEM_SETTINGS -> Icons.Rounded.Settings
+    ActionIntent.CAPTURE_SCREEN_NOTE -> Icons.Rounded.EditNote
     ActionIntent.NONE -> Icons.Rounded.Code
 }
