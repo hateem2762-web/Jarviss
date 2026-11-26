@@ -1,0 +1,6 @@
+{
+  "name": "JARVIS",
+  "description": "Kişisel, hızlı ve pratik yapay zeka asistanı; uygulama açma, URL ve YouTube arama, hatırlatıcı kurma ve öz yanıtlar.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
