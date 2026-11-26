@@ -2,9 +2,7 @@ package com.example.ui.screens
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,26 +15,23 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.material.icons.rounded.Layers
@@ -45,8 +40,6 @@ import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.RecordVoiceOver
-import androidx.compose.material.icons.rounded.StopCircle
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -63,32 +56,42 @@ import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.model.HudTopicResolver
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.JarvisMood
+import com.example.model.JarvisVisualState
 import com.example.model.ProactiveAlertItem
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.ui.JarvisUiState
-import com.example.ui.components.ActionDispatchCard
+import com.example.ui.components.JarvisHudHeader
 import com.example.ui.components.JarvisTopHudBar
+import com.example.ui.components.LiveSubtitleDisplay
+import com.example.ui.components.MinimalistChatStreamView
+import com.example.ui.components.ParticleNebulaCanvas
 import com.example.ui.components.ProactiveAlertCard
 import com.example.ui.components.VoiceOrbButton
+import com.example.ui.components.resolveMoodAccentColor
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCyan
+import kotlin.math.sin
+import kotlinx.coroutines.delay
 
 private data class QuickCommandPrompt(
     val label: String,
@@ -103,6 +106,7 @@ private val StarterCommands = listOf(
     QuickCommandPrompt("Pil durumu", "Şarjım kaç?", Icons.Rounded.BatteryChargingFull),
 )
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun AssistantScreen(
     uiState: JarvisUiState,
@@ -134,15 +138,79 @@ fun AssistantScreen(
     modifier: Modifier = Modifier,
 ) {
     var inputText by rememberSaveable { mutableStateOf("") }
-    val listState = rememberLazyListState()
+    val combinedError = uiState.errorMessage ?: uiState.voiceState.errorMessage
 
-    LaunchedEffect(uiState.messages.size) {
-        if (uiState.messages.isNotEmpty()) {
-            listState.animateScrollToItem(uiState.messages.lastIndex)
+    val latestBotMessage = remember(uiState.messages) {
+        uiState.messages.lastOrNull { !it.isUser }
+    }
+    val visualState = when {
+        combinedError != null -> JarvisVisualState.ERROR
+        uiState.voiceState.isListening -> JarvisVisualState.LISTENING
+        uiState.isProcessing -> JarvisVisualState.THINKING
+        uiState.speakingMessageId != null -> JarvisVisualState.SPEAKING
+        else -> JarvisVisualState.IDLE
+    }
+    val effectiveMood = when {
+        combinedError != null -> JarvisMood.ALERT
+        uiState.proactiveAlerts.isNotEmpty() && latestBotMessage == null -> JarvisMood.SERIOUS
+        else -> uiState.currentMood
+    }
+    val dynamicHeader = remember(
+        uiState.voiceState.isListening,
+        uiState.isProcessing,
+        combinedError,
+        uiState.proactiveAlerts.size,
+        latestBotMessage?.id,
+        uiState.currentTopicTitle,
+    ) {
+        HudTopicResolver.resolveHeader(
+            isListening = uiState.voiceState.isListening,
+            isProcessing = uiState.isProcessing,
+            hasError = combinedError != null,
+            hasProactiveAlert = uiState.proactiveAlerts.isNotEmpty(),
+            latestActionIntent = latestBotMessage?.action?.intent,
+            aiTopicTitle = uiState.currentTopicTitle,
+        )
+    }
+
+    // Subtle speaking cadence amplitude when JARVIS is reading aloud (TTS)
+    var ttsCadenceRms by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(uiState.speakingMessageId) {
+        if (uiState.speakingMessageId == null) {
+            ttsCadenceRms = 0f
+            return@LaunchedEffect
+        }
+        var t = 0f
+        while (uiState.speakingMessageId != null) {
+            t += 0.25f
+            ttsCadenceRms = (0.28f + 0.25f * kotlin.math.abs(sin(t)) + 0.14f * kotlin.math.abs(sin(t * 2.3f)))
+                .coerceIn(0.15f, 0.72f)
+            delay(65L)
         }
     }
 
-    val combinedError = uiState.errorMessage ?: uiState.voiceState.errorMessage
+    val effectiveRms = when {
+        uiState.voiceState.isListening -> uiState.voiceState.rmsLevel
+        uiState.speakingMessageId != null -> ttsCadenceRms
+        uiState.isProcessing -> 0.18f
+        else -> 0f
+    }
+
+    val liveSubtitleText = when {
+        combinedError != null -> combinedError
+        uiState.voiceState.isListening -> uiState.voiceState.partialText.ifBlank { "Dinliyorum…" }
+        uiState.isProcessing -> "Nöral analiz yürütülüyor…"
+        latestBotMessage != null -> latestBotMessage.text
+        else -> ""
+    }
+    val liveSubtitleKey = when {
+        combinedError != null -> "err_$combinedError"
+        uiState.voiceState.isListening -> "listen"
+        uiState.isProcessing -> "proc"
+        latestBotMessage != null -> latestBotMessage.id
+        else -> "idle"
+    }
+    val accentColor = resolveMoodAccentColor(visualState, effectiveMood)
 
     Column(
         modifier = modifier
@@ -174,7 +242,7 @@ fun AssistantScreen(
                 onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
                 modifier = Modifier
                     .widthIn(max = 720.dp)
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
             )
         }
 
@@ -187,7 +255,7 @@ fun AssistantScreen(
                 modifier = Modifier
                     .widthIn(max = 720.dp)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                    .padding(horizontal = 16.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -275,75 +343,131 @@ fun AssistantScreen(
             }
         }
 
+        // Dynamic HUD Core (Header + Particle Nebula + Live Subtitles)
+        Column(
+            modifier = Modifier
+                .widthIn(max = 720.dp)
+                .fillMaxWidth()
+                .padding(top = 6.dp, bottom = 6.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            JarvisHudHeader(
+                topicHeader = dynamicHeader,
+                visualState = visualState,
+                mood = effectiveMood,
+            )
+
+            val voiceOrbDesc = stringResource(R.string.cd_voice_input)
+            Box(
+                modifier = Modifier
+                    .size(if (uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty()) 210.dp else 168.dp)
+                    .clip(RoundedCornerShape(120.dp))
+                    .semantics { contentDescription = voiceOrbDesc }
+                    .clickable(onClick = onVoiceOrbClick)
+                    .testTag("jarvis_particle_nebula"),
+                contentAlignment = Alignment.Center,
+            ) {
+                ParticleNebulaCanvas(
+                    visualState = visualState,
+                    mood = effectiveMood,
+                    rmsLevel = effectiveRms,
+                    compactMode = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            LiveSubtitleDisplay(
+                subtitleText = liveSubtitleText,
+                subtitleKey = liveSubtitleKey,
+                visualState = visualState,
+                mood = effectiveMood,
+                modifier = Modifier.heightIn(min = 38.dp),
+            )
+        }
+
+        // Active Proactive WhatsApp Alerts (if any)
+        if (uiState.proactiveAlerts.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 720.dp)
+                    .fillMaxWidth()
+                    .heightIn(max = 210.dp)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                uiState.proactiveAlerts.forEach { alert ->
+                    ProactiveAlertCard(
+                        alert = alert,
+                        hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
+                        onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
+                        onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
+                        onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
+                        onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
+                        onDismiss = { onDismissProactiveAlert(alert.id) },
+                    )
+                }
+            }
+        }
+
+        // Translucent Bubble-Free Minimalist Chat Stream (RecyclerView) OR Starter Chips
         Box(
             modifier = Modifier
                 .weight(1f)
+                .widthIn(max = 720.dp)
                 .fillMaxWidth(),
-            contentAlignment = Alignment.TopCenter,
+            contentAlignment = Alignment.BottomCenter,
         ) {
-            if (uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty()) {
-                EmptyAssistantHud(
-                    onQuickCommand = onSendCommand,
+            if (uiState.messages.isEmpty()) {
+                FlowRow(
                     modifier = Modifier
-                        .widthIn(max = 720.dp)
-                        .fillMaxSize(),
-                )
-            } else {
-                LazyColumn(
-                    state = listState,
-                    modifier = Modifier
-                        .widthIn(max = 720.dp)
-                        .fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 14.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    items(uiState.proactiveAlerts, key = { "proactive_${it.id}" }) { alert ->
-                        ProactiveAlertCard(
-                            alert = alert,
-                            hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
-                            onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
-                            onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
-                            onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
-                            onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
-                            onDismiss = { onDismissProactiveAlert(alert.id) },
-                        )
-                    }
-
-                    if (uiState.messages.isEmpty()) {
-                        item(key = "empty_hud_inline") {
-                            EmptyAssistantHud(
-                                onQuickCommand = onSendCommand,
-                                modifier = Modifier.fillMaxWidth(),
-                            )
-                        }
-                    } else {
-                        items(uiState.messages, key = { it.id }) { msg ->
-                            MessageBubble(
-                                message = msg,
-                                isSpeaking = uiState.speakingMessageId == msg.id,
-                                onRunAction = { action -> onRunAction(msg.id, action) },
-                                onCopy = { onCopyMessage(msg.text) },
-                                onToggleSpeak = { onToggleSpeakMessage(msg) },
-                            )
-                        }
-                    }
-
-                    if (uiState.voiceState.isListening) {
-                        item(key = "listening_live") {
-                            LiveStatusRow(
-                                text = uiState.voiceState.partialText.ifBlank { "Seni dinliyorum…" },
-                                isLoading = false,
-                            )
-                        }
-                    } else if (uiState.isProcessing) {
-                        item(key = "processing_live") {
-                            LiveStatusRow(
-                                text = "Komut işleniyor…",
-                                isLoading = true,
-                            )
+                    StarterCommands.forEachIndexed { index, item ->
+                        Surface(
+                            shape = RoundedCornerShape(14.dp),
+                            color = MaterialTheme.colorScheme.surface,
+                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                            modifier = Modifier
+                                .minimumInteractiveComponentSize()
+                                .clip(RoundedCornerShape(14.dp))
+                                .clickable { onSendCommand(item.command) }
+                                .testTag("quick_command_chip_$index"),
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Icon(
+                                    imageVector = item.icon,
+                                    contentDescription = null,
+                                    tint = accentColor,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                                Text(
+                                    text = item.label,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
                         }
                     }
                 }
+            } else {
+                MinimalistChatStreamView(
+                    messages = uiState.messages,
+                    accentColor = accentColor,
+                    speakingMessageId = uiState.speakingMessageId,
+                    onRunAction = onRunAction,
+                    onCopyMessage = onCopyMessage,
+                    onToggleSpeakMessage = onToggleSpeakMessage,
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
 
@@ -499,217 +623,6 @@ private fun PermissionOnboardingCard(
                     }
                 }
             }
-        }
-    }
-}
-
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun EmptyAssistantHud(
-    onQuickCommand: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Column(
-        modifier = modifier.padding(horizontal = 24.dp, vertical = 20.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.Center,
-    ) {
-        Box(
-            modifier = Modifier
-                .size(76.dp)
-                .clip(CircleShape)
-                .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Image(
-                painter = painterResource(id = R.drawable.img_jarvis_core),
-                contentDescription = stringResource(R.string.cd_jarvis_core),
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-
-        Spacer(modifier = Modifier.height(16.dp))
-
-        Text(
-            text = stringResource(R.string.empty_title),
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-            textAlign = TextAlign.Center,
-        )
-
-        Spacer(modifier = Modifier.height(6.dp))
-
-        Text(
-            text = stringResource(R.string.empty_subtitle),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-
-        Spacer(modifier = Modifier.height(22.dp))
-
-        FlowRow(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            StarterCommands.forEachIndexed { index, item ->
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = MaterialTheme.colorScheme.surface,
-                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .clip(RoundedCornerShape(14.dp))
-                        .clickable { onQuickCommand(item.command) }
-                        .testTag("quick_command_chip_$index"),
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(
-                            imageVector = item.icon,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(16.dp),
-                        )
-                        Text(
-                            text = item.label,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MessageBubble(
-    message: JarvisMessage,
-    isSpeaking: Boolean,
-    onRunAction: (JarvisAction) -> Unit,
-    onCopy: () -> Unit,
-    onToggleSpeak: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (message.isUser) Arrangement.End else Arrangement.Start,
-    ) {
-        if (message.isUser) {
-            Surface(
-                shape = RoundedCornerShape(16.dp, 16.dp, 4.dp, 16.dp),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                modifier = Modifier.widthIn(max = 520.dp),
-            ) {
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                )
-            }
-        } else {
-            Surface(
-                shape = RoundedCornerShape(16.dp, 16.dp, 16.dp, 4.dp),
-                color = MaterialTheme.colorScheme.surface,
-                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                modifier = Modifier.fillMaxWidth(0.95f),
-            ) {
-                Column(
-                    modifier = Modifier.padding(14.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(
-                        text = message.text,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-
-                    if (message.action != null) {
-                        ActionDispatchCard(
-                            message = message,
-                            action = message.action,
-                            onRunAction = { onRunAction(message.action) },
-                        )
-                    }
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        OutlinedButton(
-                            onClick = onCopy,
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("copy_message_button_${message.id}"),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        ) {
-                            Icon(imageVector = Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp))
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Kopyala", style = MaterialTheme.typography.labelSmall)
-                        }
-
-                        OutlinedButton(
-                            onClick = onToggleSpeak,
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .testTag("tts_message_button_${message.id}"),
-                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                        ) {
-                            Icon(
-                                imageVector = if (isSpeaking) Icons.Rounded.StopCircle else Icons.AutoMirrored.Rounded.VolumeUp,
-                                contentDescription = null,
-                                modifier = Modifier.size(15.dp),
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text(
-                                text = if (isSpeaking) "Durdur" else "Dinle",
-                                style = MaterialTheme.typography.labelSmall,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun LiveStatusRow(
-    text: String,
-    isLoading: Boolean,
-) {
-    Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surface,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            if (isLoading) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-            Text(
-                text = text,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

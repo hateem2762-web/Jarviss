@@ -1,7 +1,9 @@
 package com.example
 
 import com.example.model.ActionIntent
+import com.example.model.HudTopicResolver
 import com.example.model.JarvisAction
+import com.example.model.JarvisMood
 import com.example.model.TapCoordinateItem
 import com.example.system.CoordinateMatcher
 import com.example.system.LocalQuickCommandMatcher
@@ -215,5 +217,105 @@ class ExampleUnitTest {
         assertEquals("wifi", wifiSettings?.target)
 
         assertNull(LocalQuickCommandMatcher.match("Türkiye'nin başkenti neresidir?"))
+    }
+
+    @Test
+    fun jarvis_mood_and_hud_topic_resolver_map_states_accurately() {
+        assertEquals(JarvisMood.NEUTRAL, JarvisMood.fromWire("unknown"))
+        assertEquals(JarvisMood.SERIOUS, JarvisMood.fromWire("SERIOUS"))
+        assertEquals(JarvisMood.ANALYTICAL, JarvisMood.fromWire("analytical"))
+        assertEquals(JarvisMood.ENERGETIC, JarvisMood.fromWire("energetic"))
+        assertEquals(JarvisMood.ALERT, JarvisMood.fromWire("alert"))
+
+        assertEquals(
+            "SİSTEM UYARISI // KRİTİK",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = true,
+                hasProactiveAlert = true,
+                latestActionIntent = ActionIntent.CAPTURE_SCREEN_NOTE,
+                aiTopicTitle = "STRATEJİ ANALİZİ",
+            )
+        )
+        assertEquals(
+            "SES KANALI // DİNLENİYOR",
+            HudTopicResolver.resolveHeader(
+                isListening = true,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = false,
+                latestActionIntent = null,
+                aiTopicTitle = "",
+            )
+        )
+        assertEquals(
+            "İLETİŞİM PROTOKOLÜ // TASLAK",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = true,
+                latestActionIntent = null,
+                aiTopicTitle = "",
+            )
+        )
+        assertEquals(
+            "GÖRSEL TARAMA // ARŞİV KAYDI",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = false,
+                latestActionIntent = ActionIntent.CAPTURE_SCREEN_NOTE,
+                aiTopicTitle = "",
+            )
+        )
+        assertEquals(
+            "HEDEF KİLİTLEME // OTOMASYON",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = false,
+                latestActionIntent = ActionIntent.TAP_COORDINATE,
+                aiTopicTitle = "",
+            )
+        )
+        assertEquals(
+            "SİSTEM DURUMU // ANALİZ",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = false,
+                latestActionIntent = ActionIntent.BATTERY_STATUS,
+                aiTopicTitle = "",
+            )
+        )
+        assertEquals(
+            "STRATEJİ ANALİZİ",
+            HudTopicResolver.resolveHeader(
+                isListening = false,
+                isProcessing = false,
+                hasError = false,
+                hasProactiveAlert = false,
+                latestActionIntent = null,
+                aiTopicTitle = "Strateji Analizi",
+            )
+        )
+
+        assertEquals(
+            JarvisMood.ANALYTICAL,
+            HudTopicResolver.moodForAction(ActionIntent.CAPTURE_SCREEN_NOTE, JarvisMood.NEUTRAL)
+        )
+        assertEquals(
+            JarvisMood.ENERGETIC,
+            HudTopicResolver.moodForAction(ActionIntent.TAP_COORDINATE, JarvisMood.NEUTRAL)
+        )
+        assertEquals(
+            JarvisMood.SERIOUS,
+            HudTopicResolver.moodForAction(ActionIntent.SET_REMINDER, JarvisMood.NEUTRAL)
+        )
     }
 }

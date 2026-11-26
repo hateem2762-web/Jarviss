@@ -480,6 +480,10 @@ fun JarvisApp(
                                 onChangeImportanceThreshold = viewModel::setImportanceThreshold,
                                 onDisableAllOverlays = viewModel::disableAllOverlayModes,
                                 onClearHistory = viewModel::clearHistory,
+                                onGenerateAppCheckToken = viewModel::generateAppCheckDebugToken,
+                                onSaveAppCheckToken = viewModel::saveAppCheckDebugToken,
+                                onCopyAppCheckToken = viewModel::copyTextToClipboard,
+                                onResetAppCheckToken = viewModel::resetAppCheckToRecaptcha,
                             )
                         }
                     }

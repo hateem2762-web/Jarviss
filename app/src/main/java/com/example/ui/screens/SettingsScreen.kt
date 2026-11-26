@@ -60,6 +60,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.R
 import com.example.ui.JarvisUiState
+import com.example.ui.components.AppCheckSettingsCard
 
 private val ContextPresets = listOf(
     "Kısa ve net yanıt ver",
@@ -93,6 +94,10 @@ fun SettingsScreen(
     onChangeImportanceThreshold: (Int) -> Unit,
     onDisableAllOverlays: () -> Unit,
     onClearHistory: () -> Unit,
+    onGenerateAppCheckToken: () -> Unit,
+    onSaveAppCheckToken: (String) -> Unit,
+    onCopyAppCheckToken: (String) -> Unit,
+    onResetAppCheckToken: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var contextDraft by rememberSaveable { mutableStateOf(uiState.preferences.userContext) }
@@ -615,6 +620,14 @@ fun SettingsScreen(
                     }
                 }
             }
+
+            AppCheckSettingsCard(
+                status = uiState.appCheckStatus,
+                onGenerateDebugToken = onGenerateAppCheckToken,
+                onSaveDebugToken = onSaveAppCheckToken,
+                onCopyDebugToken = onCopyAppCheckToken,
+                onResetToRecaptcha = onResetAppCheckToken,
+            )
 
             OutlinedButton(
                 onClick = { showClearConfirm = true },

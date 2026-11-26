@@ -9,7 +9,12 @@ import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.accessibility.JarvisAccessibilityService
+import com.example.ai.AppCheckStatusInfo
 import com.example.ai.JarvisRepository
+import com.example.ai.clearCustomDebugToken
+import com.example.ai.generateAndSaveDebugToken
+import com.example.ai.getAppCheckStatus
+import com.example.ai.saveCustomDebugToken
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
@@ -23,9 +28,11 @@ import com.example.data.preferences.JarvisPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
+import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.JarvisMood
 import com.example.model.NoteItem
 import com.example.model.ProactiveAlertItem
 import com.example.model.ReminderItem
@@ -68,6 +75,9 @@ data class JarvisUiState(
     val errorMessage: String? = null,
     val lastFailedPrompt: String? = null,
     val toastMessage: String? = null,
+    val appCheckStatus: AppCheckStatusInfo = AppCheckStatusInfo(),
+    val currentMood: JarvisMood = JarvisMood.NEUTRAL,
+    val currentTopicTitle: String = "",
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -86,6 +96,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val errorFlow = MutableStateFlow<String?>(null)
     private val lastFailedPromptFlow = MutableStateFlow<String?>(null)
     private val toastFlow = MutableStateFlow<String?>(null)
+    private val appCheckStatusFlow = MutableStateFlow(getAppCheckStatus(application))
+    private val currentMoodFlow = MutableStateFlow(JarvisMood.NEUTRAL)
+    private val currentTopicTitleFlow = MutableStateFlow("")
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -104,6 +117,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val voice: VoiceInputState,
         val foregroundPkg: String?,
         val accessibilityConnected: Boolean,
+        val appCheckStatus: AppCheckStatusInfo,
     )
 
     private data class TransientSnapshot(
@@ -141,12 +155,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         voiceManager.state,
         JarvisAccessibilityService.currentForegroundPackage,
         JarvisAccessibilityService.isServiceConnected,
-    ) { apps, voice, fgPkg, a11yConnected ->
+        appCheckStatusFlow,
+    ) { apps, voice, fgPkg, a11yConnected, appCheck ->
         RuntimeSnapshot(
             apps = apps,
             voice = voice,
             foregroundPkg = fgPkg,
             accessibilityConnected = a11yConnected,
+            appCheckStatus = appCheck,
         )
     }
 
@@ -166,11 +182,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
+    private val hudMetaFlow: Flow<Pair<JarvisMood, String>> = combine(
+        currentMoodFlow,
+        currentTopicTitleFlow,
+    ) { mood, topic -> mood to topic }
+
     val uiState: StateFlow<JarvisUiState> = combine(
         persistentFlow,
         runtimeFlow,
         transientFlow,
-    ) { persistent, runtime, transient ->
+        hudMetaFlow,
+    ) { persistent, runtime, transient, (mood, topicTitle) ->
         val fgPkg = runtime.foregroundPkg
         val fgName = if (!fgPkg.isNullOrBlank()) {
             actionExecutor.resolveAppDisplayName(fgPkg)
@@ -211,6 +233,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             errorMessage = transient.error,
             lastFailedPrompt = transient.failedPrompt,
             toastMessage = transient.toast,
+            appCheckStatus = runtime.appCheckStatus,
+            currentMood = mood,
+            currentTopicTitle = topicTitle,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -334,6 +359,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     } else {
                         execResult.detail
                     }
+                    currentMoodFlow.value = if (execResult.status == ActionExecutionStatus.FAILED) {
+                        JarvisMood.ALERT
+                    } else {
+                        JarvisMood.ENERGETIC
+                    }
+                    currentTopicTitleFlow.value = "HEDEF KİLİTLEME // OTOMASYON"
                     val insertedId = dao.insertMessage(
                         ChatMessageEntity(
                             isUser = false,
@@ -357,6 +388,19 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                         activeProfilePackage = activeProfilePkg,
                     )
                     val replyText = execResult.detail.ifBlank { "${localAction.intent.displayLabel} tamamlandı." }
+                    currentMoodFlow.value = if (execResult.status == ActionExecutionStatus.FAILED) {
+                        JarvisMood.ALERT
+                    } else {
+                        HudTopicResolver.moodForAction(localAction.intent, JarvisMood.ENERGETIC)
+                    }
+                    currentTopicTitleFlow.value = HudTopicResolver.resolveHeader(
+                        isListening = false,
+                        isProcessing = false,
+                        hasError = execResult.status == ActionExecutionStatus.FAILED,
+                        hasProactiveAlert = false,
+                        latestActionIntent = localAction.intent,
+                        aiTopicTitle = "",
+                    )
                     val insertedId = dao.insertMessage(
                         ChatMessageEntity(
                             isUser = false,
@@ -384,6 +428,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 result.fold(
                     onSuccess = { reply ->
                         val action = reply.action
+                        currentMoodFlow.value = action?.let {
+                            HudTopicResolver.moodForAction(it.intent, reply.mood)
+                        } ?: reply.mood
+                        currentTopicTitleFlow.value = HudTopicResolver.resolveHeader(
+                            isListening = false,
+                            isProcessing = false,
+                            hasError = false,
+                            hasProactiveAlert = false,
+                            latestActionIntent = action?.intent,
+                            aiTopicTitle = reply.topicTitle,
+                        )
                         val insertedId = dao.insertMessage(
                             ChatMessageEntity(
                                 isUser = false,
@@ -409,6 +464,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 status = execResult.status.name,
                                 detail = execResult.detail,
                             )
+                            if (execResult.status == ActionExecutionStatus.FAILED) {
+                                currentMoodFlow.value = JarvisMood.ALERT
+                            }
                             if (
                                 action.intent == ActionIntent.BATTERY_STATUS ||
                                 action.intent == ActionIntent.TORCH_CONTROL ||
@@ -425,6 +483,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     },
                     onFailure = { throwable ->
                         Log.e(TAG, "askJarvis failed", throwable)
+                        currentMoodFlow.value = JarvisMood.ALERT
+                        currentTopicTitleFlow.value = "SİSTEM UYARISI // KRİTİK"
                         lastFailedPromptFlow.value = text
                         errorFlow.value = throwable.localizedMessage
                             ?: "JARVIS yanıt verirken bir hata oluştu."
@@ -434,6 +494,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "dispatchCommand failed", e)
+                currentMoodFlow.value = JarvisMood.ALERT
+                currentTopicTitleFlow.value = "SİSTEM UYARISI // KRİTİK"
                 lastFailedPromptFlow.value = text
                 errorFlow.value = e.localizedMessage
                     ?: "Komut işlenirken beklenmeyen bir hata oluştu."
@@ -757,6 +819,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun clearHistory() {
         viewModelScope.launch {
             dao.clearMessages()
+            currentMoodFlow.value = JarvisMood.NEUTRAL
+            currentTopicTitleFlow.value = ""
             toastFlow.value = "Sohbet geçmişi temizlendi."
         }
     }
@@ -764,7 +828,36 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun dismissError() {
         errorFlow.value = null
         lastFailedPromptFlow.value = null
+        if (currentMoodFlow.value == JarvisMood.ALERT) {
+            currentMoodFlow.value = JarvisMood.NEUTRAL
+            currentTopicTitleFlow.value = ""
+        }
         voiceManager.clearError()
+    }
+
+    fun refreshAppCheckStatus() {
+        appCheckStatusFlow.value = getAppCheckStatus(getApplication())
+    }
+
+    fun generateAppCheckDebugToken() {
+        val updated = generateAndSaveDebugToken(getApplication())
+        appCheckStatusFlow.value = updated
+        if (updated.debugToken.isNotBlank()) {
+            copyTextToClipboard(updated.debugToken)
+            toastFlow.value = "Debug Token oluşturuldu ve panoya kopyalandı."
+        }
+    }
+
+    fun saveAppCheckDebugToken(token: String) {
+        val trimmed = token.trim()
+        if (trimmed.isBlank()) return
+        appCheckStatusFlow.value = saveCustomDebugToken(getApplication(), trimmed)
+        toastFlow.value = "App Check Debug Token kaydedildi ve aktif edildi."
+    }
+
+    fun resetAppCheckToRecaptcha() {
+        appCheckStatusFlow.value = clearCustomDebugToken(getApplication())
+        toastFlow.value = "Özel Debug Token temizlendi."
     }
 
     fun consumeToast() {

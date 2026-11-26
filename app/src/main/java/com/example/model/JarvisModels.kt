@@ -1,5 +1,7 @@
 package com.example.model
 
+import java.util.Locale
+
 enum class JarvisDestination {
     ASSISTANT,
     NOTES,
@@ -157,3 +159,76 @@ data class NoteItem(
     val createdAtMillis: Long,
     val updatedAtMillis: Long,
 )
+
+enum class JarvisMood(val wireValue: String) {
+    NEUTRAL("neutral"),
+    SERIOUS("serious"),
+    ANALYTICAL("analytical"),
+    ENERGETIC("energetic"),
+    ALERT("alert");
+
+    companion object {
+        fun fromWire(value: String?): JarvisMood {
+            val normalized = value?.trim()?.lowercase().orEmpty()
+            return entries.firstOrNull { it.wireValue == normalized } ?: NEUTRAL
+        }
+    }
+}
+
+enum class JarvisVisualState {
+    IDLE,
+    LISTENING,
+    THINKING,
+    SPEAKING,
+    ERROR,
+}
+
+object HudTopicResolver {
+    fun resolveHeader(
+        isListening: Boolean,
+        isProcessing: Boolean,
+        hasError: Boolean,
+        hasProactiveAlert: Boolean,
+        latestActionIntent: ActionIntent?,
+        aiTopicTitle: String,
+    ): String {
+        return when {
+            hasError -> "SİSTEM UYARISI // KRİTİK"
+            isListening -> "SES KANALI // DİNLENİYOR"
+            isProcessing -> "NÖRAL ÇEKİRDEK // ANALİZ"
+            hasProactiveAlert -> "İLETİŞİM PROTOKOLÜ // TASLAK"
+            latestActionIntent == ActionIntent.CAPTURE_SCREEN_NOTE -> "GÖRSEL TARAMA // ARŞİV KAYDI"
+            latestActionIntent == ActionIntent.TAP_COORDINATE -> "HEDEF KİLİTLEME // OTOMASYON"
+            latestActionIntent == ActionIntent.SET_REMINDER -> "ZAMANLAYICI // HATIRLATMA"
+            latestActionIntent in setOf(
+                ActionIntent.BATTERY_STATUS,
+                ActionIntent.TORCH_CONTROL,
+                ActionIntent.VOLUME_CONTROL,
+                ActionIntent.OPEN_SYSTEM_SETTINGS,
+            ) -> "SİSTEM DURUMU // ANALİZ"
+            aiTopicTitle.isNotBlank() -> aiTopicTitle.trim().uppercase(Locale("tr", "TR"))
+            latestActionIntent in setOf(
+                ActionIntent.OPEN_APP,
+                ActionIntent.OPEN_URL,
+                ActionIntent.SEARCH_YOUTUBE,
+                ActionIntent.GO_HOME,
+            ) -> "KOMUT İCRASI // YÖNLENDİRME"
+            else -> "ÇEKİRDEK HAZIR // BEKLEMEDE"
+        }
+    }
+
+    fun moodForAction(intent: ActionIntent, fallbackMood: JarvisMood): JarvisMood {
+        return when (intent) {
+            ActionIntent.CAPTURE_SCREEN_NOTE,
+            ActionIntent.BATTERY_STATUS -> JarvisMood.ANALYTICAL
+            ActionIntent.TAP_COORDINATE,
+            ActionIntent.TORCH_CONTROL,
+            ActionIntent.SEARCH_YOUTUBE -> JarvisMood.ENERGETIC
+            ActionIntent.SET_REMINDER,
+            ActionIntent.OPEN_SYSTEM_SETTINGS,
+            ActionIntent.VOLUME_CONTROL -> JarvisMood.SERIOUS
+            else -> fallbackMood
+        }
+    }
+}
+

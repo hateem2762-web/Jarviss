@@ -6,6 +6,7 @@ import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
+import com.example.model.JarvisMood
 import com.example.system.ReminderDurationParser
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
@@ -32,6 +33,8 @@ data class JarvisAiReply(
     val text: String,
     val ttsSummary: String,
     val action: JarvisAction?,
+    val mood: JarvisMood = JarvisMood.NEUTRAL,
+    val topicTitle: String = "",
 )
 
 data class WhatsAppEvaluation(
@@ -91,8 +94,15 @@ class JarvisRepository {
             "message" to Schema.string(
                 description = "set_reminder için hatırlatma metni; diğer durumlarda boş string."
             ),
+            "mood" to Schema.enumeration(
+                values = listOf("neutral", "serious", "analytical", "energetic", "alert"),
+                description = "Yanıtın tonu/duygusu: neutral (normal/bilgi), serious (odaklı/uyarı/planlama), analytical (düşünceli/teknik/analiz), energetic (onay/esprili/hızlı işlem), alert (kritik uyarı/hata)."
+            ),
+            "topic_title" to Schema.string(
+                description = "Konuşulan konuya uygun 2-3 kelimelik kısa büyük harfli HUD başlığı (ör. STRATEJİ ANALİZİ, HİKAYE KURGUSU, SİSTEM DURUMU, İLETİŞİM PROTOKOLÜ)."
+            ),
         ),
-        optionalProperties = listOf("minutes", "seconds")
+        optionalProperties = listOf("minutes", "seconds", "mood", "topic_title")
     )
 
     private val schemaGenerationConfig = generationConfig {
@@ -245,7 +255,7 @@ class JarvisRepository {
                 lower.contains("app check") ||
                 lower.contains("appcheck") ||
                 lower.contains("attestation") ->
-                "Firebase App Check doğrulaması reddedildi (403). Bu APK özel imza ile derlendiyse Release derlemesi kullan veya debug token ekle."
+                "Firebase App Check doğrulaması reddedildi (403). Debug APK kullanıyorsan Ayarlar > Firebase App Check bölümünden Debug Token oluşturup Firebase Console'a ekle veya kayıtlı token'ı gir.${if (raw.isNotBlank()) "\nDetay: $raw" else ""}"
             lower.contains("network") || lower.contains("unable to resolve host") ->
                 "İnternet bağlantısı kurulamadı. Bağlantını kontrol edip tekrar dene."
             raw.isNotBlank() -> raw
@@ -354,6 +364,11 @@ class JarvisRepository {
             }
         }
 
+        val mood = JarvisMood.fromWire(json.optString("mood", "neutral"))
+        val topicTitle = json.optString("topic_title", "").let {
+            if (it == "null") "" else it.trim().uppercase(Locale("tr", "TR"))
+        }
+
         val finalReply = reply.ifBlank {
             if (action != null) "${action.intent.displayLabel} hazırlanıyor." else "Tamam."
         }
@@ -361,6 +376,8 @@ class JarvisRepository {
             text = finalReply,
             ttsSummary = ttsSummary.ifBlank { finalReply },
             action = action,
+            mood = mood,
+            topicTitle = topicTitle,
         )
     }
 
@@ -421,9 +438,11 @@ class JarvisRepository {
             $coordsSection
             KULLANICI BAĞLAMI: $contextSection
 
-            ÇIKTI MODLARI:
+            ÇIKTI MODLARI VE HUD ETİKETLERİ:
             - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings veya capture_screen_note niyeti varsa mode="action", reply alanına tek satır onay yaz.
             - MOD 2 (mode="answer"): Bilgi sorusu, özet, metin üretimi veya sohbetse mode="answer", intent="none" seç.
+            - mood alanına yanıtın duygusunu (neutral, serious, analytical, energetic, alert) yaz.
+            - topic_title alanına konuyu özetleyen 2-3 kelimelik kısa büyük harfli HUD başlığı yaz (ör. "STRATEJİ ANALİZİ", "GÜNLÜK PLAN", "SİSTEM DURUMU").
         """.trimIndent()
     }
 

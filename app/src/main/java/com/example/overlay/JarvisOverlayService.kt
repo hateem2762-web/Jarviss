@@ -17,20 +17,16 @@ import android.os.Build
 import android.os.IBinder
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -66,13 +62,10 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Keyboard
-import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.NoteAdd
-import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -85,27 +78,31 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ComposeView
-import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -124,7 +121,10 @@ import com.example.data.preferences.JarvisPreferences
 import com.example.data.preferences.UserPreferencesRepository
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
+import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
+import com.example.model.JarvisMood
+import com.example.model.JarvisVisualState
 import com.example.model.ProactiveAlertItem
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.notifications.ProactiveAlertNotifier
@@ -133,14 +133,21 @@ import com.example.system.JarvisActionExecutor
 import com.example.system.LocalQuickCommandMatcher
 import com.example.system.VoiceInputManager
 import com.example.system.WakeWordManager
+import com.example.ui.components.JarvisHudHeader
+import com.example.ui.components.LiveSubtitleDisplay
+import com.example.ui.components.ParticleNebulaCanvas
 import com.example.ui.components.ProactiveAlertCard
+import com.example.ui.components.resolveMoodAccentColor
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCrimson
 import com.example.ui.theme.JarvisCyan
 import com.example.ui.theme.JarvisEmerald
 import com.example.ui.theme.JarvisTheme
+import com.example.ui.theme.JetBrainsMonoFontFamily
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.sin
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -155,6 +162,7 @@ private const val TAG = "JarvisOverlayService"
 
 data class OverlayUiState(
     val isListening: Boolean = false,
+    val isSpeaking: Boolean = false,
     val partialText: String = "",
     val rmsLevel: Float = 0f,
     val userText: String = "",
@@ -167,6 +175,10 @@ data class OverlayUiState(
     val ttsEnabled: Boolean = false,
     val copied: Boolean = false,
     val activeProfileLabel: String = "",
+    val mood: JarvisMood = JarvisMood.NEUTRAL,
+    val topicTitle: String = "",
+    val lastActionIntent: ActionIntent? = null,
+    val recentLines: List<Pair<Boolean, String>> = emptyList(),
 )
 
 data class CrosshairPositionState(
@@ -194,6 +206,7 @@ class JarvisOverlayService : Service() {
     private val overlayState = MutableStateFlow(OverlayUiState())
     private val crosshairState = MutableStateFlow(CrosshairPositionState())
     private val wakeWordIndicator = MutableStateFlow(false)
+    private val bubbleMoodState = MutableStateFlow(JarvisMood.NEUTRAL)
     private val isDraggingBubble = MutableStateFlow(false)
     private val isOverDismissZone = MutableStateFlow(false)
     private var prefsSnapshot = JarvisPreferences()
@@ -291,6 +304,20 @@ class JarvisOverlayService : Service() {
                     val res = tts?.setLanguage(Locale("tr", "TR"))
                     ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
                         res != TextToSpeech.LANG_NOT_SUPPORTED
+                    tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {
+                            overlayState.value = overlayState.value.copy(isSpeaking = true)
+                        }
+
+                        override fun onDone(utteranceId: String?) {
+                            overlayState.value = overlayState.value.copy(isSpeaking = false)
+                        }
+
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            overlayState.value = overlayState.value.copy(isSpeaking = false)
+                        }
+                    })
                 }
             }
         } catch (e: Exception) {
@@ -530,6 +557,7 @@ class JarvisOverlayService : Service() {
         overlayState.value = OverlayUiState(
             ttsEnabled = prefsSnapshot.speakReplies,
             activeProfileLabel = activeLabel,
+            mood = bubbleMoodState.value,
         )
 
         val lifecycleOwner = OverlayLifecycleOwner().apply { onCreate() }
@@ -645,13 +673,18 @@ class JarvisOverlayService : Service() {
         if (query.isEmpty() || overlayState.value.isProcessing) return
 
         autoCloseJob?.cancel()
+        val updatedWithUser = (overlayState.value.recentLines + (true to query)).takeLast(8)
         overlayState.value = overlayState.value.copy(
             userText = query,
             isProcessing = true,
+            isSpeaking = false,
             errorText = null,
             actionDetail = "",
             actionFailed = false,
             copied = false,
+            topicTitle = "",
+            lastActionIntent = null,
+            recentLines = updatedWithUser,
         )
 
         serviceScope.launch {
@@ -693,12 +726,21 @@ class JarvisOverlayService : Service() {
                         status = execResult.status.name,
                         detail = execResult.detail,
                     )
+                    val resolvedMood = if (execResult.status == ActionExecutionStatus.FAILED) {
+                        JarvisMood.ALERT
+                    } else {
+                        HudTopicResolver.moodForAction(ActionIntent.TAP_COORDINATE, JarvisMood.ENERGETIC)
+                    }
+                    bubbleMoodState.value = resolvedMood
                     overlayState.value = overlayState.value.copy(
                         replyText = replyText,
                         ttsSummary = replyText,
                         actionDetail = "${execResult.detail} (0 token)",
                         actionFailed = execResult.status == ActionExecutionStatus.FAILED,
                         isProcessing = false,
+                        mood = resolvedMood,
+                        lastActionIntent = ActionIntent.TAP_COORDINATE,
+                        recentLines = (overlayState.value.recentLines + (false to replyText)).takeLast(8),
                     )
                     if (execResult.status == ActionExecutionStatus.EXECUTED) {
                         autoCloseJob = serviceScope.launch {
@@ -730,12 +772,21 @@ class JarvisOverlayService : Service() {
                             timestampMillis = System.currentTimeMillis(),
                         )
                     )
+                    val resolvedMood = if (execResult.status == ActionExecutionStatus.FAILED) {
+                        JarvisMood.ALERT
+                    } else {
+                        HudTopicResolver.moodForAction(localAction.intent, JarvisMood.SERIOUS)
+                    }
+                    bubbleMoodState.value = resolvedMood
                     overlayState.value = overlayState.value.copy(
                         replyText = replyText,
                         ttsSummary = replyText,
                         actionDetail = "${execResult.detail} (0 token)",
                         actionFailed = execResult.status == ActionExecutionStatus.FAILED,
                         isProcessing = false,
+                        mood = resolvedMood,
+                        lastActionIntent = localAction.intent,
+                        recentLines = (overlayState.value.recentLines + (false to replyText)).takeLast(8),
                     )
                     if (overlayState.value.ttsEnabled && ttsReady) {
                         tts?.speak(
@@ -785,11 +836,12 @@ class JarvisOverlayService : Service() {
                             )
                         )
 
-                        overlayState.value = overlayState.value.copy(
-                            replyText = reply.text,
-                            ttsSummary = reply.ttsSummary,
-                            isProcessing = false,
-                        )
+                        val initialMood = if (action != null) {
+                            HudTopicResolver.moodForAction(action.intent, reply.mood)
+                        } else {
+                            reply.mood
+                        }
+                        bubbleMoodState.value = initialMood
 
                         if (action != null) {
                             val execResult = actionExecutor.execute(
@@ -815,11 +867,22 @@ class JarvisOverlayService : Service() {
                             } else {
                                 reply.text
                             }
+                            val finalMood = if (execResult.status == ActionExecutionStatus.FAILED) {
+                                JarvisMood.ALERT
+                            } else {
+                                initialMood
+                            }
+                            bubbleMoodState.value = finalMood
                             overlayState.value = overlayState.value.copy(
                                 replyText = displayReply,
                                 ttsSummary = displayReply,
                                 actionDetail = execResult.detail,
                                 actionFailed = execResult.status == ActionExecutionStatus.FAILED,
+                                isProcessing = false,
+                                mood = finalMood,
+                                topicTitle = reply.topicTitle,
+                                lastActionIntent = action.intent,
+                                recentLines = (overlayState.value.recentLines + (false to displayReply)).takeLast(8),
                             )
 
                             if (overlayState.value.ttsEnabled && ttsReady) {
@@ -846,27 +909,42 @@ class JarvisOverlayService : Service() {
                                     collapseOrStopOverlay()
                                 }
                             }
-                        } else if (overlayState.value.ttsEnabled && ttsReady) {
-                            tts?.speak(
-                                reply.ttsSummary,
-                                TextToSpeech.QUEUE_FLUSH,
-                                null,
-                                "jarvis_overlay_$insertedId"
+                        } else {
+                            overlayState.value = overlayState.value.copy(
+                                replyText = reply.text,
+                                ttsSummary = reply.ttsSummary,
+                                isProcessing = false,
+                                mood = initialMood,
+                                topicTitle = reply.topicTitle,
+                                lastActionIntent = null,
+                                recentLines = (overlayState.value.recentLines + (false to reply.text)).takeLast(8),
                             )
+                            if (overlayState.value.ttsEnabled && ttsReady) {
+                                tts?.speak(
+                                    reply.ttsSummary,
+                                    TextToSpeech.QUEUE_FLUSH,
+                                    null,
+                                    "jarvis_overlay_$insertedId"
+                                )
+                            }
                         }
                     },
                     onFailure = { err ->
                         Log.w(TAG, "Gemini failed for userMsg=$userMsgId: ${err.message}")
+                        bubbleMoodState.value = JarvisMood.ALERT
                         overlayState.value = overlayState.value.copy(
                             isProcessing = false,
+                            mood = JarvisMood.ALERT,
                             errorText = err.localizedMessage ?: "Yanıt alınamadı.",
                         )
                     }
                 )
             } catch (e: Exception) {
                 Log.e(TAG, "Overlay query failed", e)
+                bubbleMoodState.value = JarvisMood.ALERT
                 overlayState.value = overlayState.value.copy(
                     isProcessing = false,
+                    mood = JarvisMood.ALERT,
                     errorText = e.localizedMessage ?: "Bir hata oluştu.",
                 )
             }
@@ -1134,6 +1212,7 @@ class JarvisOverlayService : Service() {
             }
         } else {
             tts?.stop()
+            overlayState.value = overlayState.value.copy(isSpeaking = false)
         }
     }
 
@@ -1249,14 +1328,22 @@ class JarvisOverlayService : Service() {
             setViewTreeViewModelStoreOwner(lifecycleOwner)
             setContent {
                 val wakeActive by wakeWordIndicator.collectAsStateWithLifecycle()
+                val bubbleMood by bubbleMoodState.collectAsStateWithLifecycle()
+                val bubbleAccent = resolveMoodAccentColor(
+                    visualState = if (wakeActive) JarvisVisualState.LISTENING else JarvisVisualState.IDLE,
+                    mood = bubbleMood,
+                )
+                val openAssistantLabel = stringResource(R.string.speak_to_jarvis)
                 Box(
                     modifier = Modifier.size(56.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    // Minimal matte circle bubble (tap to re-open, drag to bottom dismiss zone to close)
+                    // Minimal matte circle bubble with live miniature Particle Nebula (tap to re-open, drag to dismiss)
                     Surface(
                         modifier = Modifier
-                            .size(48.dp)
+                            .size(50.dp)
+                            .testTag("floating_jarvis_bubble")
+                            .semantics { contentDescription = openAssistantLabel }
                             .pointerInput(Unit) {
                                 detectDragGestures(
                                     onDragStart = {
@@ -1300,22 +1387,26 @@ class JarvisOverlayService : Service() {
                             .clip(CircleShape)
                             .clickable { showExpandedOverlay() },
                         shape = CircleShape,
-                        color = Color(0xF2101319),
-                        border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                        shadowElevation = 10.dp,
+                        color = Color(0xF2080B10),
+                        border = BorderStroke(1.dp, bubbleAccent.copy(alpha = 0.55f)),
+                        shadowElevation = 12.dp,
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Rounded.Mic,
-                                contentDescription = stringResource(R.string.speak_to_jarvis),
-                                tint = Color(0xFFF1F5F9),
-                                modifier = Modifier.size(20.dp),
+                        Box(
+                            modifier = Modifier.fillMaxSize(),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            ParticleNebulaCanvas(
+                                visualState = if (wakeActive) JarvisVisualState.LISTENING else JarvisVisualState.IDLE,
+                                mood = bubbleMood,
+                                rmsLevel = if (wakeActive) 0.14f else 0f,
+                                compactMode = true,
+                                modifier = Modifier.fillMaxSize(),
                             )
                             if (wakeActive) {
                                 Box(
                                     modifier = Modifier
                                         .align(Alignment.BottomEnd)
-                                        .padding(9.dp)
+                                        .padding(7.dp)
                                         .size(6.dp)
                                         .clip(CircleShape)
                                         .background(JarvisEmerald)
@@ -1689,70 +1780,159 @@ private fun OverlayCardContent(
 ) {
     var showTextField by remember { mutableStateOf(false) }
     var draftText by remember { mutableStateOf("") }
+    var isMinimizing by remember { mutableStateOf(false) }
+
+    val shrinkScale by animateFloatAsState(
+        targetValue = if (isMinimizing) 0.22f else 1f,
+        animationSpec = tween(durationMillis = 175),
+        label = "overlay_shrink_scale",
+    )
+    val shrinkAlpha by animateFloatAsState(
+        targetValue = if (isMinimizing) 0f else 1f,
+        animationSpec = tween(durationMillis = 165),
+        label = "overlay_shrink_alpha",
+    )
+
+    LaunchedEffect(isMinimizing) {
+        if (isMinimizing) {
+            delay(175L)
+            onClose()
+        }
+    }
+
+    val visualState = when {
+        state.errorText != null -> JarvisVisualState.ERROR
+        state.isListening -> JarvisVisualState.LISTENING
+        state.isProcessing -> JarvisVisualState.THINKING
+        state.isSpeaking -> JarvisVisualState.SPEAKING
+        else -> JarvisVisualState.IDLE
+    }
+
+    val effectiveMood = if (state.errorText != null) JarvisMood.ALERT else state.mood
+    val accentColor = resolveMoodAccentColor(visualState, effectiveMood)
+    val dynamicHeader = remember(
+        state.isListening,
+        state.isProcessing,
+        state.errorText,
+        state.lastActionIntent,
+        state.topicTitle,
+    ) {
+        HudTopicResolver.resolveHeader(
+            isListening = state.isListening,
+            isProcessing = state.isProcessing,
+            hasError = state.errorText != null,
+            hasProactiveAlert = false,
+            latestActionIntent = state.lastActionIntent,
+            aiTopicTitle = state.topicTitle,
+        )
+    }
+
+    var ttsCadenceRms by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(state.isSpeaking) {
+        if (!state.isSpeaking) {
+            ttsCadenceRms = 0f
+            return@LaunchedEffect
+        }
+        var t = 0f
+        while (state.isSpeaking) {
+            t += 0.26f
+            ttsCadenceRms = (0.28f + 0.26f * abs(sin(t)) + 0.14f * abs(sin(t * 2.2f)))
+                .coerceIn(0.16f, 0.72f)
+            delay(65L)
+        }
+    }
+
+    val effectiveRms = when {
+        state.isListening -> state.rmsLevel
+        state.isSpeaking -> ttsCadenceRms
+        state.isProcessing -> 0.18f
+        else -> 0f
+    }
+
+    val liveSubtitleText = when {
+        state.errorText != null -> state.errorText
+        state.isListening -> state.partialText.ifBlank { "Dinliyorum…" }
+        state.isProcessing -> "Nöral analiz yürütülüyor…"
+        state.replyText.isNotBlank() -> state.replyText
+        else -> ""
+    }
+    val liveSubtitleKey = when {
+        state.errorText != null -> "err_${state.errorText}"
+        state.isListening -> "listen"
+        state.isProcessing -> "proc"
+        state.replyText.isNotBlank() -> "reply_${state.replyText.hashCode()}"
+        else -> "idle"
+    }
+
+    val historyScroll = rememberScrollState()
+    LaunchedEffect(state.recentLines.size) {
+        if (state.recentLines.isNotEmpty()) {
+            historyScroll.animateScrollTo(historyScroll.maxValue)
+        }
+    }
 
     Surface(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 16.dp)
-            .widthIn(max = 520.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFF0E1218),
-        border = BorderStroke(1.dp, Color(0xFF232B38)),
-        shadowElevation = 18.dp,
+            .widthIn(max = 520.dp)
+            .graphicsLayer {
+                scaleX = shrinkScale
+                scaleY = shrinkScale
+                alpha = shrinkAlpha
+            },
+        shape = RoundedCornerShape(26.dp),
+        color = Color(0xF5080B10),
+        border = BorderStroke(1.dp, accentColor.copy(alpha = 0.28f)),
+        shadowElevation = 20.dp,
     ) {
         Column(
-            modifier = Modifier.padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp),
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
         ) {
+            // Minimalist Top HUD Utility Bar
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Surface(
-                    modifier = Modifier.size(34.dp),
-                    shape = CircleShape,
-                    color = Color(0xFF161C26),
-                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = "J",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = Color(0xFFF1F5F9),
-                        )
-                    }
-                }
-                Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         text = "JARVIS",
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.labelLarge.copy(
+                            fontFamily = JetBrainsMonoFontFamily,
+                            letterSpacing = 1.6.sp,
+                            fontWeight = FontWeight.SemiBold,
+                        ),
                         color = Color(0xFFF1F5F9),
                     )
-                    Text(
-                        text = when {
-                            state.isListening -> "Dinleniyor…"
-                            state.isProcessing -> "İşleniyor…"
-                            state.activeProfileLabel.isNotBlank() -> state.activeProfileLabel
-                            else -> "Hazır"
-                        },
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (state.isListening) JarvisCrimson else Color(0xFF8B97AA),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    if (state.activeProfileLabel.isNotBlank()) {
+                        Text(
+                            text = state.activeProfileLabel,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color(0xFF7D899C),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
                 }
 
-                IconButton(onClick = { showTextField = !showTextField }) {
+                IconButton(
+                    onClick = { showTextField = !showTextField },
+                    modifier = Modifier.testTag("overlay_keyboard_toggle_button"),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Keyboard,
                         contentDescription = "Yazarak komut ver",
-                        tint = if (showTextField) JarvisCyan else Color(0xFF8B97AA),
+                        tint = if (showTextField) accentColor else Color(0xFF8B97AA),
                         modifier = Modifier.size(20.dp),
                     )
                 }
 
-                IconButton(onClick = onToggleTts) {
+                IconButton(
+                    onClick = onToggleTts,
+                    modifier = Modifier.testTag("overlay_tts_toggle_button"),
+                ) {
                     Icon(
                         imageVector = if (state.ttsEnabled) {
                             Icons.AutoMirrored.Rounded.VolumeUp
@@ -1760,12 +1940,15 @@ private fun OverlayCardContent(
                             Icons.AutoMirrored.Rounded.VolumeOff
                         },
                         contentDescription = "Sesli okuma aç veya kapat",
-                        tint = if (state.ttsEnabled) JarvisCyan else Color(0xFF8B97AA),
+                        tint = if (state.ttsEnabled) accentColor else Color(0xFF8B97AA),
                         modifier = Modifier.size(20.dp),
                     )
                 }
 
-                IconButton(onClick = onClose) {
+                IconButton(
+                    onClick = { isMinimizing = true },
+                    modifier = Modifier.testTag("overlay_minimize_bubble_button"),
+                ) {
                     Icon(
                         imageVector = Icons.Rounded.Close,
                         contentDescription = "Yüzen baloncuğa küçült",
@@ -1775,76 +1958,103 @@ private fun OverlayCardContent(
                 }
             }
 
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color(0xFF151A23))
-                    .border(1.dp, Color(0xFF232B38), RoundedCornerShape(16.dp))
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                FilledIconButton(
-                    onClick = onMicToggle,
-                    modifier = Modifier.size(48.dp),
-                    shape = CircleShape,
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = if (state.isListening) JarvisCrimson else JarvisCyan,
-                        contentColor = if (state.isListening) Color.White else Color(0xFF090B0F),
-                    ),
-                ) {
-                    Icon(
-                        imageVector = if (state.isListening) Icons.Rounded.Stop else Icons.Rounded.Mic,
-                        contentDescription = stringResource(R.string.cd_voice_input),
-                    )
-                }
+            // Contextual HUD Header
+            JarvisHudHeader(
+                topicHeader = dynamicHeader,
+                visualState = visualState,
+                mood = effectiveMood,
+            )
 
-                Column(modifier = Modifier.weight(1f)) {
-                    if (state.isListening) {
-                        VoiceWaveEqualizer(
-                            rmsLevel = state.rmsLevel,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .height(22.dp),
-                        )
-                        if (state.partialText.isNotBlank()) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            Text(
-                                text = state.partialText,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFF1F5F9),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
+            // Centerpiece Reactive Particle Nebula (tap to start/stop listening)
+            val micToggleDesc = stringResource(R.string.cd_voice_input)
+            Box(
+                modifier = Modifier
+                    .size(134.dp)
+                    .clip(CircleShape)
+                    .testTag("overlay_particle_nebula")
+                    .semantics { contentDescription = micToggleDesc }
+                    .clickable(onClick = onMicToggle),
+                contentAlignment = Alignment.Center,
+            ) {
+                ParticleNebulaCanvas(
+                    visualState = visualState,
+                    mood = effectiveMood,
+                    rmsLevel = effectiveRms,
+                    compactMode = false,
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+
+            // Live Typewriter Subtitle Stream
+            LiveSubtitleDisplay(
+                subtitleText = liveSubtitleText,
+                subtitleKey = liveSubtitleKey,
+                visualState = visualState,
+                mood = effectiveMood,
+            )
+
+            if (state.actionDetail.isNotBlank() && state.actionDetail != state.replyText) {
+                Text(
+                    text = state.actionDetail,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (state.actionFailed) JarvisCrimson else JarvisEmerald,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+
+            // Bubble-free translucent chat log with smooth top fade-out mask
+            if (state.recentLines.size > 1) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(max = 110.dp),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .verticalScroll(historyScroll)
+                            .padding(top = 14.dp, bottom = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        state.recentLines.forEach { (isUser, text) ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(
+                                    text = if (isUser) "SEN" else "JARVIS",
+                                    style = MaterialTheme.typography.labelSmall.copy(
+                                        fontFamily = JetBrainsMonoFontFamily,
+                                        fontSize = 10.sp,
+                                    ),
+                                    color = if (isUser) Color(0xFF7D899C) else accentColor,
+                                )
+                                Text(
+                                    text = text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isUser) Color(0xFF94A3B8) else Color(0xFFE2E8F0),
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
                         }
-                    } else if (state.isProcessing) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(16.dp),
-                                strokeWidth = 2.dp,
-                                color = JarvisCyan,
-                            )
-                            Text(
-                                text = state.userText,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = Color(0xFFCBD5E1),
-                                maxLines = 2,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    } else {
-                        Text(
-                            text = state.userText.ifBlank { "Komut söyleyin veya aşağıdaki hızlı araçları kullanın." },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (state.userText.isBlank()) Color(0xFF8B97AA) else Color(0xFFF1F5F9),
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                        )
                     }
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(20.dp)
+                            .align(Alignment.TopCenter)
+                            .background(
+                                Brush.verticalGradient(
+                                    colors = listOf(
+                                        Color(0xF5080B10),
+                                        Color.Transparent,
+                                    )
+                                )
+                            ),
+                    )
                 }
             }
 
@@ -1857,7 +2067,9 @@ private fun OverlayCardContent(
                     OutlinedTextField(
                         value = draftText,
                         onValueChange = { draftText = it },
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("overlay_command_input"),
                         placeholder = { Text("Komut veya soru yaz…", style = MaterialTheme.typography.bodySmall) },
                         singleLine = true,
                         shape = RoundedCornerShape(14.dp),
@@ -1871,7 +2083,7 @@ private fun OverlayCardContent(
                             }
                         ),
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = JarvisCyan,
+                            focusedBorderColor = accentColor,
                             unfocusedBorderColor = Color(0xFF232B38),
                             focusedTextColor = Color(0xFFF1F5F9),
                             unfocusedTextColor = Color(0xFFF1F5F9),
@@ -1885,9 +2097,11 @@ private fun OverlayCardContent(
                             }
                         },
                         enabled = draftText.isNotBlank() && !state.isProcessing,
-                        modifier = Modifier.size(48.dp),
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("overlay_send_button"),
                         colors = IconButtonDefaults.filledIconButtonColors(
-                            containerColor = JarvisCyan,
+                            containerColor = accentColor,
                             contentColor = Color(0xFF090B0F),
                         ),
                     ) {
@@ -1899,54 +2113,7 @@ private fun OverlayCardContent(
                 }
             }
 
-            if (state.errorText != null) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = Color(0xFF3A0E1B),
-                    border = BorderStroke(1.dp, JarvisCrimson.copy(alpha = 0.4f)),
-                ) {
-                    Text(
-                        text = state.errorText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = Color(0xFFFECDD3),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                    )
-                }
-            }
-
-            if (state.replyText.isNotBlank()) {
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = Color(0xFF151A23),
-                    border = BorderStroke(1.dp, Color(0xFF232B38)),
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 200.dp)
-                            .verticalScroll(rememberScrollState())
-                            .padding(12.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text(
-                            text = state.replyText,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = Color(0xFFF1F5F9),
-                        )
-
-                        if (state.actionDetail.isNotBlank() && state.actionDetail != state.replyText) {
-                            Text(
-                                text = state.actionDetail,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = if (state.actionFailed) JarvisCrimson else JarvisEmerald,
-                            )
-                        }
-                    }
-                }
-            }
-
+            // Compact Quick Action Strip
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1959,7 +2126,7 @@ private fun OverlayCardContent(
                     enabled = !state.isProcessing,
                     contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                     border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = JarvisCyan),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
                 ) {
                     Icon(
                         imageVector = Icons.Rounded.NoteAdd,
@@ -2289,39 +2456,4 @@ private fun SaveCoordinateDialogOverlay(
     }
 }
 
-@Composable
-private fun VoiceWaveEqualizer(
-    rmsLevel: Float,
-    modifier: Modifier = Modifier,
-) {
-    val transition = rememberInfiniteTransition(label = "wave")
-    val phase by transition.animateFloat(
-        initialValue = 0f,
-        targetValue = 1f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(550, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "phase",
-    )
 
-    Canvas(modifier = modifier) {
-        val barCount = 18
-        val gap = size.width / (barCount * 2f)
-        val barWidth = gap
-        val ampBoost = (0.35f + rmsLevel * 0.65f).coerceIn(0.3f, 1f)
-
-        for (i in 0 until barCount) {
-            val factor = kotlin.math.abs(kotlin.math.sin((i * 0.55f + phase * 3.14f).toDouble())).toFloat()
-            val barHeight = (size.height * (0.22f + factor * 0.78f * ampBoost)).coerceAtLeast(4f)
-            val x = i * (barWidth + gap)
-            val y = (size.height - barHeight) / 2f
-            drawRoundRect(
-                color = if (i % 3 == 0) JarvisAmber else JarvisCyan,
-                topLeft = Offset(x, y),
-                size = Size(barWidth, barHeight),
-                cornerRadius = CornerRadius(barWidth / 2f, barWidth / 2f),
-            )
-        }
-    }
-}

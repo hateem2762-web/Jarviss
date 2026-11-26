@@ -22,7 +22,7 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools build-tools;35.0.0 platforms;android-35
+          packages: platform-tools build-tools;35.0.0 platforms;android-35 platforms;android-36
 
       - name: Accept Android licenses
         run: |
@@ -31,10 +31,21 @@ jobs:
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      - name: Disable custom debug signing if present
+      - name: Restore debug keystore from base64
         run: |
-          if [ -f app/build.gradle.kts ]; then
+          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+            base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ ! -f debug.keystore ]; then
             sed -i 's/signingConfig = signingConfigs.getByName("debugConfig")/\/\/ signingConfig = signingConfigs.getByName("debugConfig")/' app/build.gradle.kts || true
+          fi
+
+      - name: Restore google-services.json from Secret (if missing)
+        env:
+          GOOGLE_SERVICES_JSON: ${{ secrets.GOOGLE_SERVICES_JSON }}
+        run: |
+          if [ ! -f app/google-services.json ] && [ -n "$GOOGLE_SERVICES_JSON" ]; then
+            printf '%s' "$GOOGLE_SERVICES_JSON" > app/google-services.json
           fi
 
       - name: Build Debug APK
