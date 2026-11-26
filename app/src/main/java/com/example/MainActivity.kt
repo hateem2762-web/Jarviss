@@ -120,6 +120,15 @@ fun JarvisApp(
             ) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var hasNotificationPermission by remember {
+        mutableStateOf(
+            Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     // Refresh permission states whenever returning from Android Settings
     DisposableEffect(lifecycleOwner) {
@@ -131,8 +140,16 @@ fun JarvisApp(
                     context,
                     Manifest.permission.RECORD_AUDIO
                 ) == PackageManager.PERMISSION_GRANTED
+                hasNotificationPermission =
+                    Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.POST_NOTIFICATIONS
+                        ) == PackageManager.PERMISSION_GRANTED
                 viewModel.refreshInstalledApps()
-                viewModel.syncOverlayServiceIfNeeded()
+                if (hasNotificationPermission) {
+                    viewModel.syncOverlayServiceIfNeeded()
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -167,9 +184,23 @@ fun JarvisApp(
         }
     }
 
+    val wakeWordMicLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasMicPermission = granted
+        if (granted) {
+            viewModel.setWakeWordEnabled(true)
+        } else {
+            scope.launch {
+                snackbarHostState.showSnackbar(context.getString(R.string.mic_permission_needed))
+            }
+        }
+    }
+
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
-    ) { _ ->
+    ) { granted ->
+        hasNotificationPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || granted
         viewModel.syncOverlayServiceIfNeeded()
     }
 
@@ -215,22 +246,46 @@ fun JarvisApp(
         }
     }
 
-    // Request notification permission on Android 13+ when persistent trigger or reminders are used
-    LaunchedEffect(uiState.reminders.size, uiState.preferences.persistentTriggerEnabled) {
-        if (
-            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            !askedNotificationPermission &&
-            (uiState.reminders.isNotEmpty() || uiState.preferences.persistentTriggerEnabled)
-        ) {
-            val granted = ContextCompat.checkSelfPermission(
-                context,
-                Manifest.permission.POST_NOTIFICATIONS
-            ) == PackageManager.PERMISSION_GRANTED
-            if (!granted) {
+    val toggleFloatingBubble: (Boolean) -> Unit = { enabled ->
+        if (enabled && !Settings.canDrawOverlays(context)) {
+            scope.launch {
+                snackbarHostState.showSnackbar(context.getString(R.string.overlay_permission_needed))
+            }
+            requestOverlayPermission()
+        } else {
+            viewModel.setFloatingBubbleEnabled(enabled)
+        }
+    }
+
+    val toggleWakeWord: (Boolean) -> Unit = { enabled ->
+        if (!enabled) {
+            viewModel.setWakeWordEnabled(false)
+        } else if (!Settings.canDrawOverlays(context)) {
+            scope.launch {
+                snackbarHostState.showSnackbar(
+                    "\"Jarvis\" uyandırma için önce Üstte Göster izni gerekli."
+                )
+            }
+            requestOverlayPermission()
+        } else if (!hasMicPermission) {
+            wakeWordMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        } else {
+            viewModel.setWakeWordEnabled(true)
+        }
+    }
+
+    // Request notification permission on Android 13+ only when background/reminder features require it
+    val needsServiceOrReminders = uiState.reminders.isNotEmpty() ||
+        uiState.preferences.persistentTriggerEnabled ||
+        uiState.preferences.floatingBubbleEnabled ||
+        uiState.preferences.wakeWordEnabled
+
+    LaunchedEffect(needsServiceOrReminders, hasNotificationPermission) {
+        if (!needsServiceOrReminders) return@LaunchedEffect
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && !hasNotificationPermission) {
+            if (!askedNotificationPermission) {
                 askedNotificationPermission = true
                 notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-            } else {
-                viewModel.syncOverlayServiceIfNeeded()
             }
         } else {
             viewModel.syncOverlayServiceIfNeeded()
@@ -305,6 +360,8 @@ fun JarvisApp(
                                 },
                                 onOpenAccessibilitySettings = openAccessibilitySettings,
                                 onLaunchOverlay = launchOverlay,
+                                onToggleWakeWord = toggleWakeWord,
+                                onDisableAllOverlays = viewModel::disableAllOverlayModes,
                                 onSendCommand = viewModel::sendCommand,
                                 onRetry = viewModel::retryLastCommand,
                                 onRunAction = viewModel::executeActionForMessage,
@@ -350,7 +407,9 @@ fun JarvisApp(
                                 onToggleAutoExecute = viewModel::setAutoExecuteActions,
                                 onToggleSpeakReplies = viewModel::setSpeakReplies,
                                 onTogglePersistentTrigger = viewModel::setPersistentTriggerEnabled,
-                                onToggleFloatingBubble = viewModel::setFloatingBubbleEnabled,
+                                onToggleFloatingBubble = toggleFloatingBubble,
+                                onToggleWakeWord = toggleWakeWord,
+                                onDisableAllOverlays = viewModel::disableAllOverlayModes,
                                 onClearHistory = viewModel::clearHistory,
                             )
                         }

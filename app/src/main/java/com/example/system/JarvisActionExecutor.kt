@@ -38,44 +38,58 @@ class JarvisActionExecutor(
         val pm = context.packageManager
         val discovered = LinkedHashMap<String, InstalledAppInfo>()
 
-        val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
-            addCategory(Intent.CATEGORY_LAUNCHER)
-        }
-        val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.queryIntentActivities(
-                mainIntent,
-                PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong())
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            pm.queryIntentActivities(mainIntent, PackageManager.MATCH_ALL)
-        }
-
-        for (info in resolveInfos) {
-            val pkg = info.activityInfo.packageName
-            if (pkg == context.packageName) continue
-            val label = info.loadLabel(pm).toString().trim()
-            if (label.isNotEmpty()) {
-                discovered.putIfAbsent(pkg, InstalledAppInfo(label = label, packageName = pkg))
+        try {
+            val mainIntent = Intent(Intent.ACTION_MAIN, null).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
             }
-        }
+            val resolveInfos = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.queryIntentActivities(
+                    mainIntent,
+                    PackageManager.ResolveInfoFlags.of(PackageManager.MATCH_ALL.toLong())
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.queryIntentActivities(mainIntent, PackageManager.MATCH_ALL)
+            }
 
-        val installedApps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
-        } else {
-            @Suppress("DEPRECATION")
-            pm.getInstalledApplications(0)
-        }
-
-        for (appInfo in installedApps) {
-            val pkg = appInfo.packageName
-            if (pkg == context.packageName || discovered.containsKey(pkg)) continue
-            if (pm.getLaunchIntentForPackage(pkg) != null) {
-                val label = pm.getApplicationLabel(appInfo).toString().trim()
-                if (label.isNotEmpty()) {
-                    discovered[pkg] = InstalledAppInfo(label = label, packageName = pkg)
+            for (info in resolveInfos) {
+                try {
+                    val pkg = info.activityInfo?.packageName ?: continue
+                    if (pkg == context.packageName) continue
+                    val label = info.loadLabel(pm)?.toString()?.trim().orEmpty()
+                    if (label.isNotEmpty()) {
+                        discovered.putIfAbsent(pkg, InstalledAppInfo(label = label, packageName = pkg))
+                    }
+                } catch (_: Exception) {
                 }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "queryIntentActivities failed", e)
+        }
+
+        try {
+            val installedApps = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getInstalledApplications(PackageManager.ApplicationInfoFlags.of(0L))
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getInstalledApplications(0)
+            }
+
+            for (appInfo in installedApps) {
+                try {
+                    val pkg = appInfo.packageName
+                    if (pkg == context.packageName || discovered.containsKey(pkg)) continue
+                    if (pm.getLaunchIntentForPackage(pkg) != null) {
+                        val label = pm.getApplicationLabel(appInfo)?.toString()?.trim().orEmpty()
+                        if (label.isNotEmpty()) {
+                            discovered[pkg] = InstalledAppInfo(label = label, packageName = pkg)
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "getInstalledApplications failed", e)
         }
 
         discovered.values.sortedBy { it.label.lowercase(Locale.ROOT) }

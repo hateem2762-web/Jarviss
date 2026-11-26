@@ -4,7 +4,9 @@ import com.example.model.ActionIntent
 import com.example.model.JarvisAction
 import com.example.model.TapCoordinateItem
 import com.example.system.CoordinateMatcher
+import com.example.system.WakeWordManager
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,5 +97,21 @@ class ExampleUnitTest {
             "Transfer",
             CoordinateMatcher.findByModelLabel("transfer", coordinates)?.label
         )
+    }
+
+    @Test
+    fun wake_word_detection_and_trailing_command_work_accurately() {
+        assertTrue(WakeWordManager.containsWakeWord("Jarvis"))
+        assertTrue(WakeWordManager.containsWakeWord("Hey Jarvis YouTube aç"))
+        assertTrue(WakeWordManager.containsWakeWord("carvis selam"))
+        assertTrue(WakeWordManager.containsWakeWord("Yarvis"))
+
+        assertFalse(WakeWordManager.containsWakeWord("Merhaba dünya"))
+        assertFalse(WakeWordManager.containsWakeWord("Servis aracı geldi"))
+        assertFalse(WakeWordManager.containsWakeWord(""))
+
+        assertNull(WakeWordManager.extractTrailingCommand("Jarvis"))
+        assertEquals("YouTube aç", WakeWordManager.extractTrailingCommand("Jarvis YouTube aç"))
+        assertEquals("hava nasıl", WakeWordManager.extractTrailingCommand("Hey carvis, hava nasıl?"))
     }
 }

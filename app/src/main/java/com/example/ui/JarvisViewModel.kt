@@ -194,29 +194,44 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         initialValue = JarvisUiState(),
     )
 
+    private var wasListeningInApp = false
+
     init {
         refreshInstalledApps()
         initTextToSpeech()
+        viewModelScope.launch {
+            voiceManager.state.collect { voice ->
+                if (wasListeningInApp && !voice.isListening && uiState.value.preferences.wakeWordEnabled) {
+                    JarvisOverlayService.resumeWakeWord(getApplication())
+                }
+                wasListeningInApp = voice.isListening
+            }
+        }
     }
 
     private fun initTextToSpeech() {
-        tts = TextToSpeech(getApplication()) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                val res = tts?.setLanguage(Locale("tr", "TR"))
-                ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
-                    res != TextToSpeech.LANG_NOT_SUPPORTED
-                tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
-                    override fun onStart(utteranceId: String?) {}
-                    override fun onDone(utteranceId: String?) {
-                        speakingMessageIdFlow.value = null
-                    }
+        try {
+            tts = TextToSpeech(getApplication()) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    val res = tts?.setLanguage(Locale("tr", "TR"))
+                    ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
+                        res != TextToSpeech.LANG_NOT_SUPPORTED
+                    tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {
+                            speakingMessageIdFlow.value = null
+                        }
 
-                    @Deprecated("Deprecated in Java")
-                    override fun onError(utteranceId: String?) {
-                        speakingMessageIdFlow.value = null
-                    }
-                })
+                        @Deprecated("Deprecated in Java")
+                        override fun onError(utteranceId: String?) {
+                            speakingMessageIdFlow.value = null
+                        }
+                    })
+                }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "TextToSpeech init failed safely", e)
+            ttsReady = false
         }
     }
 
@@ -451,6 +466,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startVoiceCommand() {
+        if (uiState.value.preferences.wakeWordEnabled) {
+            JarvisOverlayService.pauseWakeWord(getApplication())
+        }
         voiceManager.clearError()
         voiceManager.startListening { transcript ->
             sendCommand(transcript)
@@ -459,6 +477,9 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun stopVoiceCommand() {
         voiceManager.stopListening()
+        if (uiState.value.preferences.wakeWordEnabled) {
+            JarvisOverlayService.resumeWakeWord(getApplication())
+        }
     }
 
     fun toggleReminderComplete(reminder: ReminderItem) {
@@ -517,20 +538,55 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun setPersistentTriggerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             prefsRepo.setPersistentTriggerEnabled(enabled)
-            JarvisOverlayService.syncMode(getApplication())
+            val current = uiState.value.preferences
+            if (enabled || current.floatingBubbleEnabled || current.wakeWordEnabled) {
+                JarvisOverlayService.syncMode(getApplication())
+            } else {
+                JarvisOverlayService.disableAll(getApplication())
+            }
         }
     }
 
     fun setFloatingBubbleEnabled(enabled: Boolean) {
         viewModelScope.launch {
             prefsRepo.setFloatingBubbleEnabled(enabled)
-            JarvisOverlayService.syncMode(getApplication())
+            val current = uiState.value.preferences
+            if (enabled || current.persistentTriggerEnabled || current.wakeWordEnabled) {
+                JarvisOverlayService.syncMode(getApplication())
+            } else {
+                JarvisOverlayService.disableAll(getApplication())
+            }
+        }
+    }
+
+    fun setWakeWordEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setWakeWordEnabled(enabled)
+            val current = uiState.value.preferences
+            if (enabled || current.persistentTriggerEnabled || current.floatingBubbleEnabled) {
+                JarvisOverlayService.syncMode(getApplication())
+            } else {
+                JarvisOverlayService.disableAll(getApplication())
+            }
+            toastFlow.value = if (enabled) {
+                "\"Jarvis\" sesli uyandırma açıldı."
+            } else {
+                "\"Jarvis\" sesli uyandırma kapatıldı."
+            }
+        }
+    }
+
+    fun disableAllOverlayModes() {
+        viewModelScope.launch {
+            prefsRepo.disableAllOverlayModes()
+            JarvisOverlayService.disableAll(getApplication())
+            toastFlow.value = "Kayan baloncuk ve hızlı servis kapatıldı."
         }
     }
 
     fun syncOverlayServiceIfNeeded() {
         val prefs = uiState.value.preferences
-        if (prefs.persistentTriggerEnabled || prefs.floatingBubbleEnabled) {
+        if (prefs.persistentTriggerEnabled || prefs.floatingBubbleEnabled || prefs.wakeWordEnabled) {
             JarvisOverlayService.syncMode(getApplication())
         }
     }

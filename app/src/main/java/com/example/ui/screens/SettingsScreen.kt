@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -82,6 +83,8 @@ fun SettingsScreen(
     onToggleSpeakReplies: (Boolean) -> Unit,
     onTogglePersistentTrigger: (Boolean) -> Unit,
     onToggleFloatingBubble: (Boolean) -> Unit,
+    onToggleWakeWord: (Boolean) -> Unit,
+    onDisableAllOverlays: () -> Unit,
     onClearHistory: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -234,12 +237,43 @@ fun SettingsScreen(
                     )
 
                     SettingToggleRow(
-                        title = "Kayan baloncuk (Floating Orb)",
-                        subtitle = "Ekran kenarında sürüklenebilir hızlı JARVIS ikonu gösterir",
+                        title = "Kayan baloncuk",
+                        subtitle = "Ekran kenarında sade hızlı erişim ikonu gösterir (üzerindeki çarpıdan veya aşağı sürükleyerek kapatılır)",
                         checked = uiState.preferences.floatingBubbleEnabled,
                         onCheckedChange = onToggleFloatingBubble,
                         testTag = "toggle_floating_bubble",
                     )
+
+                    SettingToggleRow(
+                        title = "\"Jarvis\" sesli uyandırma (uygulama dışı)",
+                        subtitle = "Başka bir uygulamadayken \"Jarvis\" dediğinizde kayan pencereyi açar",
+                        checked = uiState.preferences.wakeWordEnabled,
+                        onCheckedChange = onToggleWakeWord,
+                        testTag = "toggle_wake_word",
+                    )
+
+                    if (
+                        uiState.preferences.floatingBubbleEnabled ||
+                        uiState.preferences.persistentTriggerEnabled ||
+                        uiState.preferences.wakeWordEnabled
+                    ) {
+                        OutlinedButton(
+                            onClick = onDisableAllOverlays,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("disable_all_overlays_button"),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.PowerSettingsNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Kayan Baloncuk ve Servisi Tamamen Kapat")
+                        }
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),

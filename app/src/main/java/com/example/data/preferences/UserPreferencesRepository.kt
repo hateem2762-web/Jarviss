@@ -19,8 +19,9 @@ data class JarvisPreferences(
     val darkTheme: Boolean = true,
     val autoExecuteActions: Boolean = true,
     val speakReplies: Boolean = false,
-    val persistentTriggerEnabled: Boolean = true,
+    val persistentTriggerEnabled: Boolean = false,
     val floatingBubbleEnabled: Boolean = false,
+    val wakeWordEnabled: Boolean = false,
     val manualProfilePackageName: String = "",
     val manualProfileName: String = "",
 )
@@ -34,6 +35,7 @@ class UserPreferencesRepository(private val context: Context) {
         val SPEAK_REPLIES = booleanPreferencesKey("speak_replies")
         val PERSISTENT_TRIGGER = booleanPreferencesKey("persistent_trigger")
         val FLOATING_BUBBLE = booleanPreferencesKey("floating_bubble")
+        val WAKE_WORD = booleanPreferencesKey("wake_word_enabled")
         val MANUAL_PROFILE_PKG = stringPreferencesKey("manual_profile_pkg")
         val MANUAL_PROFILE_NAME = stringPreferencesKey("manual_profile_name")
     }
@@ -44,8 +46,9 @@ class UserPreferencesRepository(private val context: Context) {
             darkTheme = prefs[Keys.DARK_THEME] ?: true,
             autoExecuteActions = prefs[Keys.AUTO_EXECUTE_ACTIONS] ?: true,
             speakReplies = prefs[Keys.SPEAK_REPLIES] ?: false,
-            persistentTriggerEnabled = prefs[Keys.PERSISTENT_TRIGGER] ?: true,
+            persistentTriggerEnabled = prefs[Keys.PERSISTENT_TRIGGER] ?: false,
             floatingBubbleEnabled = prefs[Keys.FLOATING_BUBBLE] ?: false,
+            wakeWordEnabled = prefs[Keys.WAKE_WORD] ?: false,
             manualProfilePackageName = prefs[Keys.MANUAL_PROFILE_PKG] ?: "",
             manualProfileName = prefs[Keys.MANUAL_PROFILE_NAME] ?: "",
         )
@@ -84,6 +87,20 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setFloatingBubbleEnabled(enabled: Boolean) {
         context.jarvisDataStore.edit { prefs ->
             prefs[Keys.FLOATING_BUBBLE] = enabled
+        }
+    }
+
+    suspend fun setWakeWordEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.WAKE_WORD] = enabled
+        }
+    }
+
+    suspend fun disableAllOverlayModes() {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.FLOATING_BUBBLE] = false
+            prefs[Keys.PERSISTENT_TRIGGER] = false
+            prefs[Keys.WAKE_WORD] = false
         }
     }
 

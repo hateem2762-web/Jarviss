@@ -155,8 +155,24 @@ class JarvisRepository {
         }
 
         Result.failure(
-            Exception(primaryError?.localizedMessage ?: "JARVIS şu anda yanıt üretemedi.")
+            Exception(formatAiError(primaryError))
         )
+    }
+
+    private fun formatAiError(error: Throwable?): String {
+        val raw = error?.localizedMessage.orEmpty()
+        val lower = raw.lowercase(Locale.ROOT)
+        return when {
+            lower.contains("403") ||
+                lower.contains("app check") ||
+                lower.contains("appcheck") ||
+                lower.contains("attestation") ->
+                "Firebase App Check doğrulaması reddedildi (403). Bu APK özel imza ile derlendiyse Release derlemesi kullan veya debug token ekle."
+            lower.contains("network") || lower.contains("unable to resolve host") ->
+                "İnternet bağlantısı kurulamadı. Bağlantını kontrol edip tekrar dene."
+            raw.isNotBlank() -> raw
+            else -> "JARVIS şu anda yanıt üretemedi."
+        }
     }
 
     private suspend fun executeStreamWithTimeout(

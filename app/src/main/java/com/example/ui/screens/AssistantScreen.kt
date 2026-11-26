@@ -43,7 +43,9 @@ import androidx.compose.material.icons.rounded.Lightbulb
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.RecordVoiceOver
 import androidx.compose.material.icons.rounded.StopCircle
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
@@ -115,6 +117,8 @@ fun AssistantScreen(
     onRequestMicPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
     onLaunchOverlay: () -> Unit,
+    onToggleWakeWord: (Boolean) -> Unit,
+    onDisableAllOverlays: () -> Unit,
     onSendCommand: (String) -> Unit,
     onRetry: () -> Unit,
     onRunAction: (Long, JarvisAction) -> Unit,
@@ -178,31 +182,90 @@ fun AssistantScreen(
                     .widthIn(max = 720.dp)
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
-        } else {
-            Row(
+        }
+
+        val anyOverlayActive = uiState.preferences.floatingBubbleEnabled ||
+            uiState.preferences.persistentTriggerEnabled ||
+            uiState.preferences.wakeWordEnabled
+
+        if (hasOverlayPermission || anyOverlayActive) {
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
                 modifier = Modifier
                     .widthIn(max = 720.dp)
                     .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.End,
+                    .padding(horizontal = 16.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                FilledTonalButton(
-                    onClick = onLaunchOverlay,
-                    modifier = Modifier
-                        .minimumInteractiveComponentSize()
-                        .testTag("launch_overlay_button"),
-                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.PictureInPictureAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "Küçük Pencere (Overlay) Aç",
-                        style = MaterialTheme.typography.labelLarge,
-                    )
+                if (anyOverlayActive) {
+                    OutlinedButton(
+                        onClick = onDisableAllOverlays,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("assistant_disable_overlays_button"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PowerSettingsNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Baloncuğu Kapat",
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+                }
+
+                if (hasOverlayPermission) {
+                    OutlinedButton(
+                        onClick = { onToggleWakeWord(!uiState.preferences.wakeWordEnabled) },
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("assistant_wake_word_button"),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.RecordVoiceOver,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (uiState.preferences.wakeWordEnabled) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (uiState.preferences.wakeWordEnabled) {
+                                "\"Jarvis\": Açık"
+                            } else {
+                                "\"Jarvis\" Dinle"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = onLaunchOverlay,
+                        modifier = Modifier
+                            .minimumInteractiveComponentSize()
+                            .testTag("launch_overlay_button"),
+                        contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PictureInPictureAlt,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Küçük Pencere Aç",
+                            style = MaterialTheme.typography.labelLarge,
+                        )
+                    }
                 }
             }
         }

@@ -68,6 +68,7 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MyLocation
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -126,6 +127,7 @@ import com.example.model.InstalledAppInfo
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
 import com.example.system.VoiceInputManager
+import com.example.system.WakeWordManager
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCrimson
 import com.example.ui.theme.JarvisCyan
@@ -180,10 +182,14 @@ class JarvisOverlayService : Service() {
     private lateinit var coordinateStore: CoordinateJsonStore
     private lateinit var actionExecutor: JarvisActionExecutor
     private lateinit var voiceManager: VoiceInputManager
+    private lateinit var wakeWordManager: WakeWordManager
     private val aiRepository = JarvisRepository()
 
     private val overlayState = MutableStateFlow(OverlayUiState())
     private val crosshairState = MutableStateFlow(CrosshairPositionState())
+    private val wakeWordIndicator = MutableStateFlow(false)
+    private val isDraggingBubble = MutableStateFlow(false)
+    private val isOverDismissZone = MutableStateFlow(false)
     private var prefsSnapshot = JarvisPreferences()
 
     private var overlayView: ComposeView? = null
@@ -193,6 +199,9 @@ class JarvisOverlayService : Service() {
     private var bubbleView: ComposeView? = null
     private var bubbleLifecycle: OverlayLifecycleOwner? = null
     private var bubbleParams: WindowManager.LayoutParams? = null
+
+    private var dismissZoneView: ComposeView? = null
+    private var dismissZoneLifecycle: OverlayLifecycleOwner? = null
 
     private var crosshairReticleView: ComposeView? = null
     private var crosshairReticleParams: WindowManager.LayoutParams? = null
@@ -216,17 +225,29 @@ class JarvisOverlayService : Service() {
         coordinateStore = CoordinateJsonStore(this, dao)
         actionExecutor = JarvisActionExecutor(this, dao)
         voiceManager = VoiceInputManager(this)
+        wakeWordManager = WakeWordManager(this) { trailingCommand ->
+            if (Settings.canDrawOverlays(this)) {
+                showExpandedOverlay(autoSubmitQuery = trailingCommand)
+            }
+        }
 
         initTextToSpeech()
-        ensureForegroundNotification()
+        if (!ensureForegroundNotification()) {
+            stopSelf()
+            return
+        }
 
         serviceScope.launch {
             prefsRepo.preferences.collect { prefs ->
                 prefsSnapshot = prefs
+                wakeWordIndicator.value = prefs.wakeWordEnabled && hasMicPermission()
                 overlayState.value = overlayState.value.copy(
                     ttsEnabled = prefs.speakReplies,
                     activeProfileLabel = resolveActiveProfilePair(prefs).second,
                 )
+                ensureForegroundNotification()
+                syncWakeWordState(prefs)
+
                 if (
                     prefs.floatingBubbleEnabled &&
                     Settings.canDrawOverlays(this@JarvisOverlayService) &&
@@ -254,17 +275,45 @@ class JarvisOverlayService : Service() {
     }
 
     private fun initTextToSpeech() {
-        tts = TextToSpeech(this) { status ->
-            if (status == TextToSpeech.SUCCESS) {
-                val res = tts?.setLanguage(Locale("tr", "TR"))
-                ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
-                    res != TextToSpeech.LANG_NOT_SUPPORTED
+        try {
+            tts = TextToSpeech(this) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    val res = tts?.setLanguage(Locale("tr", "TR"))
+                    ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
+                        res != TextToSpeech.LANG_NOT_SUPPORTED
+                }
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "TTS init skipped", e)
+        }
+    }
+
+    private fun hasMicPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun syncWakeWordState(prefs: JarvisPreferences) {
+        val canRunWakeWord = prefs.wakeWordEnabled &&
+            hasMicPermission() &&
+            overlayView == null &&
+            crosshairReticleView == null &&
+            labelDialogView == null
+
+        if (canRunWakeWord) {
+            wakeWordManager.start()
+        } else if (!prefs.wakeWordEnabled) {
+            wakeWordManager.stop()
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ensureForegroundNotification()
+        if (!ensureForegroundNotification()) {
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         when (intent?.action) {
             ACTION_SHOW_OVERLAY -> {
@@ -281,6 +330,10 @@ class JarvisOverlayService : Service() {
                 serviceScope.launch {
                     val prefs = prefsRepo.preferences.first()
                     prefsSnapshot = prefs
+                    wakeWordIndicator.value = prefs.wakeWordEnabled && hasMicPermission()
+                    ensureForegroundNotification()
+                    syncWakeWordState(prefs)
+
                     if (
                         prefs.floatingBubbleEnabled &&
                         Settings.canDrawOverlays(this@JarvisOverlayService) &&
@@ -294,6 +347,7 @@ class JarvisOverlayService : Service() {
                     if (
                         !prefs.persistentTriggerEnabled &&
                         !prefs.floatingBubbleEnabled &&
+                        !prefs.wakeWordEnabled &&
                         overlayView == null &&
                         crosshairReticleView == null
                     ) {
@@ -301,7 +355,19 @@ class JarvisOverlayService : Service() {
                     }
                 }
             }
+            ACTION_DISABLE_ALL -> {
+                disableAllOverlayModesCompletely()
+            }
+            ACTION_PAUSE_WAKE -> {
+                wakeWordManager.pauseForActiveVoiceSession()
+            }
+            ACTION_RESUME_WAKE -> {
+                if (prefsSnapshot.wakeWordEnabled) {
+                    wakeWordManager.resumeAfterVoiceSession()
+                }
+            }
             ACTION_STOP_SERVICE -> {
+                wakeWordManager.stop()
                 removeAllOverlayWindows()
                 stopSelf()
             }
@@ -309,7 +375,7 @@ class JarvisOverlayService : Service() {
         return START_STICKY
     }
 
-    private fun ensureForegroundNotification() {
+    private fun ensureForegroundNotification(): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
@@ -343,10 +409,26 @@ class JarvisOverlayService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val disableIntent = Intent(this, JarvisOverlayService::class.java).apply {
+            action = ACTION_DISABLE_ALL
+        }
+        val disablePendingIntent = PendingIntent.getService(
+            this,
+            9003,
+            disableIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val contentSummary = if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
+            "\"Jarvis\" sesli uyandırma aktif • Konuş veya nokta kaydet"
+        } else {
+            "Konuş veya ekrandan dokunma noktası kaydet"
+        }
+
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_jarvis_tile)
-            .setContentTitle("JARVIS Hızlı Asistan")
-            .setContentText("Konuş veya ekrandan dokunma noktası kaydet")
+            .setContentTitle("JARVIS Hızlı Erişim")
+            .setContentText(contentSummary)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
@@ -361,16 +443,29 @@ class JarvisOverlayService : Service() {
                 getString(R.string.record_point),
                 crosshairPendingIntent
             )
+            .addAction(
+                R.drawable.ic_jarvis_tile,
+                "Kapat",
+                disablePendingIntent
+            )
             .build()
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val fgsType = if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                }
+                startForeground(NOTIFICATION_ID, notification, fgsType)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "Unable to enter foreground safely", e)
+            false
         }
     }
 
@@ -399,14 +494,19 @@ class JarvisOverlayService : Service() {
         return pkg to name
     }
 
-    private fun showExpandedOverlay() {
+    private fun showExpandedOverlay(autoSubmitQuery: String? = null) {
         autoCloseJob?.cancel()
+        wakeWordManager.pauseForActiveVoiceSession()
         removeBubble()
         removeCrosshairWindows()
         removeLabelDialog()
 
         if (overlayView != null) {
-            startOverlayListening()
+            if (!autoSubmitQuery.isNullOrBlank()) {
+                submitQuery(autoSubmitQuery)
+            } else {
+                startOverlayListening()
+            }
             return
         }
 
@@ -461,6 +561,7 @@ class JarvisOverlayService : Service() {
                             collapseOrStopOverlay()
                         },
                         onClose = { collapseOrStopOverlay() },
+                        onDisableCompletely = { disableAllOverlayModesCompletely() },
                     )
                 }
             }
@@ -469,7 +570,11 @@ class JarvisOverlayService : Service() {
         overlayView = composeView
         try {
             windowManager.addView(composeView, params)
-            startOverlayListening()
+            if (!autoSubmitQuery.isNullOrBlank()) {
+                submitQuery(autoSubmitQuery)
+            } else {
+                startOverlayListening()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to attach overlay view", e)
             removeExpandedOverlay()
@@ -477,18 +582,14 @@ class JarvisOverlayService : Service() {
     }
 
     private fun startOverlayListening() {
-        val hasMic = ContextCompat.checkSelfPermission(
-            this,
-            Manifest.permission.RECORD_AUDIO
-        ) == PackageManager.PERMISSION_GRANTED
-
-        if (!hasMic) {
+        if (!hasMicPermission()) {
             overlayState.value = overlayState.value.copy(
                 errorText = getString(R.string.mic_permission_needed)
             )
             return
         }
 
+        wakeWordManager.pauseForActiveVoiceSession()
         overlayState.value = overlayState.value.copy(errorText = null, copied = false)
         voiceManager.startListening { transcript ->
             submitQuery(transcript)
@@ -950,13 +1051,45 @@ class JarvisOverlayService : Service() {
         }
     }
 
+    private fun disableFloatingBubbleOnly() {
+        removeDismissZone()
+        removeBubble()
+        serviceScope.launch {
+            prefsRepo.setFloatingBubbleEnabled(false)
+            val updated = prefsRepo.preferences.first()
+            prefsSnapshot = updated
+            if (!updated.persistentTriggerEnabled && !updated.wakeWordEnabled && overlayView == null) {
+                stopSelf()
+            }
+        }
+    }
+
+    private fun disableAllOverlayModesCompletely() {
+        autoCloseJob?.cancel()
+        voiceManager.stopListening()
+        wakeWordManager.stop()
+        removeAllOverlayWindows()
+        serviceScope.launch {
+            prefsRepo.disableAllOverlayModes()
+            stopSelf()
+        }
+    }
+
     private fun collapseOrStopOverlay() {
         autoCloseJob?.cancel()
         voiceManager.stopListening()
         removeExpandedOverlay()
         if (prefsSnapshot.floatingBubbleEnabled && Settings.canDrawOverlays(this)) {
             showBubble()
-        } else if (!prefsSnapshot.persistentTriggerEnabled) {
+        }
+        if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
+            wakeWordManager.resumeAfterVoiceSession()
+        }
+        if (
+            !prefsSnapshot.floatingBubbleEnabled &&
+            !prefsSnapshot.persistentTriggerEnabled &&
+            !prefsSnapshot.wakeWordEnabled
+        ) {
             stopSelf()
         }
     }
@@ -981,6 +1114,7 @@ class JarvisOverlayService : Service() {
         bubbleLifecycle = lifecycleOwner
 
         val density = resources.displayMetrics.density
+        val (screenW, screenH) = JarvisAccessibilityService.getRealScreenSize(this)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
@@ -1000,38 +1134,102 @@ class JarvisOverlayService : Service() {
             setViewTreeSavedStateRegistryOwner(lifecycleOwner)
             setViewTreeViewModelStoreOwner(lifecycleOwner)
             setContent {
+                val wakeActive by wakeWordIndicator.collectAsStateWithLifecycle()
                 Box(
-                    modifier = Modifier
-                        .size(58.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF0A0E14))
-                        .border(
-                            width = 2.dp,
-                            brush = Brush.linearGradient(listOf(JarvisCyan, JarvisAmber)),
-                            shape = CircleShape,
-                        )
-                        .pointerInput(Unit) {
-                            detectDragGestures { change, dragAmount ->
-                                change.consume()
-                                bubbleParams?.let { lp ->
-                                    lp.x += dragAmount.x.roundToInt()
-                                    lp.y += dragAmount.y.roundToInt()
-                                    try {
-                                        windowManager.updateViewLayout(this@apply, lp)
-                                    } catch (_: Exception) {
-                                    }
-                                }
-                            }
-                        }
-                        .clickable { showExpandedOverlay() },
+                    modifier = Modifier.size(58.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.img_jarvis_core),
-                        contentDescription = stringResource(R.string.speak_to_jarvis),
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    // Minimal tactical Obsidian circle (no neon AI orb slop)
+                    Surface(
+                        modifier = Modifier
+                            .size(46.dp)
+                            .pointerInput(Unit) {
+                                detectDragGestures(
+                                    onDragStart = {
+                                        isDraggingBubble.value = true
+                                        isOverDismissZone.value = false
+                                        showDismissZone()
+                                    },
+                                    onDragEnd = {
+                                        val shouldDismiss = isOverDismissZone.value
+                                        isDraggingBubble.value = false
+                                        isOverDismissZone.value = false
+                                        removeDismissZone()
+                                        if (shouldDismiss) {
+                                            disableFloatingBubbleOnly()
+                                        }
+                                    },
+                                    onDragCancel = {
+                                        isDraggingBubble.value = false
+                                        isOverDismissZone.value = false
+                                        removeDismissZone()
+                                    },
+                                    onDrag = { change, dragAmount ->
+                                        change.consume()
+                                        bubbleParams?.let { lp ->
+                                            lp.x = (lp.x + dragAmount.x.roundToInt())
+                                                .coerceIn(0, (screenW - (58 * density).roundToInt()).coerceAtLeast(0))
+                                            lp.y = (lp.y + dragAmount.y.roundToInt())
+                                                .coerceIn(0, (screenH - (58 * density).roundToInt()).coerceAtLeast(0))
+                                            try {
+                                                windowManager.updateViewLayout(this@apply, lp)
+                                            } catch (_: Exception) {
+                                            }
+                                            val inDismissBand = lp.y > screenH * 0.74f &&
+                                                lp.x > screenW * 0.22f &&
+                                                lp.x < screenW * 0.78f
+                                            isOverDismissZone.value = inDismissBand
+                                        }
+                                    }
+                                )
+                            }
+                            .clip(CircleShape)
+                            .clickable { showExpandedOverlay() },
+                        shape = CircleShape,
+                        color = Color(0xEB11161F),
+                        border = BorderStroke(1.dp, Color(0x38E2E8F0)),
+                        shadowElevation = 8.dp,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.Mic,
+                                contentDescription = stringResource(R.string.speak_to_jarvis),
+                                tint = Color(0xFFF1F5F9),
+                                modifier = Modifier.size(20.dp),
+                            )
+                            if (wakeActive) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomEnd)
+                                        .padding(8.dp)
+                                        .size(6.dp)
+                                        .clip(CircleShape)
+                                        .background(JarvisEmerald)
+                                )
+                            }
+                        }
+                    }
+
+                    // Direct 1-tap close badge on top-right corner of the floating bubble
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .clickable { disableFloatingBubbleOnly() },
+                        shape = CircleShape,
+                        color = Color(0xF01E293B),
+                        border = BorderStroke(1.dp, Color(0x40FFFFFF)),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Baloncuğu kapat",
+                                tint = Color(0xFFE2E8F0),
+                                modifier = Modifier.size(12.dp),
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -1045,7 +1243,82 @@ class JarvisOverlayService : Service() {
         }
     }
 
+    private fun showDismissZone() {
+        if (dismissZoneView != null || !Settings.canDrawOverlays(this)) return
+        val owner = OverlayLifecycleOwner().apply { onCreate() }
+        dismissZoneLifecycle = owner
+
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+            y = (36 * resources.displayMetrics.density).roundToInt()
+        }
+
+        val view = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setContent {
+                val hovered by isOverDismissZone.collectAsStateWithLifecycle()
+                Surface(
+                    shape = RoundedCornerShape(28.dp),
+                    color = if (hovered) JarvisCrimson else Color(0xE611161F),
+                    border = BorderStroke(
+                        1.dp,
+                        if (hovered) Color.White.copy(alpha = 0.7f) else Color(0x40FFFFFF),
+                    ),
+                    shadowElevation = 10.dp,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Close,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Text(
+                            text = if (hovered) "Bırak ve Kapat" else "Baloncuğu Kapat",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color.White,
+                        )
+                    }
+                }
+            }
+        }
+
+        dismissZoneView = view
+        try {
+            windowManager.addView(view, params)
+        } catch (_: Exception) {
+            removeDismissZone()
+        }
+    }
+
+    private fun removeDismissZone() {
+        dismissZoneView?.let { v ->
+            try {
+                windowManager.removeView(v)
+            } catch (_: Exception) {
+            }
+        }
+        dismissZoneView = null
+        dismissZoneLifecycle?.onDestroy()
+        dismissZoneLifecycle = null
+    }
+
     private fun removeBubble() {
+        removeDismissZone()
         bubbleView?.let { view ->
             try {
                 windowManager.removeView(view)
@@ -1068,6 +1341,7 @@ class JarvisOverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         autoCloseJob?.cancel()
+        wakeWordManager.stop()
         voiceManager.destroy()
         tts?.stop()
         tts?.shutdown()
@@ -1084,27 +1358,68 @@ class JarvisOverlayService : Service() {
         const val ACTION_SHOW_OVERLAY = "com.example.action.SHOW_OVERLAY"
         const val ACTION_START_CROSSHAIR = "com.example.action.START_CROSSHAIR"
         const val ACTION_SYNC_MODE = "com.example.action.SYNC_MODE"
+        const val ACTION_DISABLE_ALL = "com.example.action.DISABLE_ALL_OVERLAY"
+        const val ACTION_PAUSE_WAKE = "com.example.action.PAUSE_WAKE_WORD"
+        const val ACTION_RESUME_WAKE = "com.example.action.RESUME_WAKE_WORD"
         const val ACTION_STOP_SERVICE = "com.example.action.STOP_OVERLAY_SERVICE"
 
         fun showOverlay(context: Context) {
             val intent = Intent(context, JarvisOverlayService::class.java).apply {
                 action = ACTION_SHOW_OVERLAY
             }
-            ContextCompat.startForegroundService(context, intent)
+            startForegroundSafely(context, intent)
         }
 
         fun startCrosshair(context: Context) {
             val intent = Intent(context, JarvisOverlayService::class.java).apply {
                 action = ACTION_START_CROSSHAIR
             }
-            ContextCompat.startForegroundService(context, intent)
+            startForegroundSafely(context, intent)
         }
 
         fun syncMode(context: Context) {
             val intent = Intent(context, JarvisOverlayService::class.java).apply {
                 action = ACTION_SYNC_MODE
             }
-            ContextCompat.startForegroundService(context, intent)
+            startForegroundSafely(context, intent)
+        }
+
+        fun pauseWakeWord(context: Context) {
+            val intent = Intent(context, JarvisOverlayService::class.java).apply {
+                action = ACTION_PAUSE_WAKE
+            }
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+            }
+        }
+
+        fun resumeWakeWord(context: Context) {
+            val intent = Intent(context, JarvisOverlayService::class.java).apply {
+                action = ACTION_RESUME_WAKE
+            }
+            try {
+                context.startService(intent)
+            } catch (_: Exception) {
+            }
+        }
+
+        fun disableAll(context: Context) {
+            val intent = Intent(context, JarvisOverlayService::class.java).apply {
+                action = ACTION_DISABLE_ALL
+            }
+            try {
+                context.stopService(intent)
+            } catch (_: Exception) {
+            }
+        }
+
+        private fun startForegroundSafely(context: Context, intent: Intent) {
+            try {
+                ContextCompat.startForegroundService(context, intent)
+            } catch (e: Exception) {
+                Log.w(TAG, "startForegroundService blocked by system state", e)
+            }
         }
     }
 }
@@ -1119,6 +1434,7 @@ private fun OverlayCardContent(
     onToggleTts: () -> Unit,
     onOpenFullApp: () -> Unit,
     onClose: () -> Unit,
+    onDisableCompletely: () -> Unit,
 ) {
     var showTextField by remember { mutableStateOf(false) }
     var draftText by remember { mutableStateOf("") }
@@ -1128,14 +1444,9 @@ private fun OverlayCardContent(
             .fillMaxWidth()
             .padding(horizontal = 14.dp)
             .widthIn(max = 540.dp),
-        shape = RoundedCornerShape(24.dp),
-        color = Color(0xFF0E141E),
-        border = BorderStroke(
-            width = 1.5.dp,
-            brush = Brush.linearGradient(
-                listOf(JarvisCyan.copy(alpha = 0.85f), JarvisAmber.copy(alpha = 0.55f))
-            ),
-        ),
+        shape = RoundedCornerShape(22.dp),
+        color = Color(0xFF0D1118),
+        border = BorderStroke(1.dp, Color(0xFF243041)),
         shadowElevation = 18.dp,
     ) {
         Column(
@@ -1146,18 +1457,19 @@ private fun OverlayCardContent(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(CircleShape)
-                        .border(1.5.dp, JarvisCyan, CircleShape),
+                Surface(
+                    modifier = Modifier.size(32.dp),
+                    shape = CircleShape,
+                    color = Color(0xFF17202D),
+                    border = BorderStroke(1.dp, Color(0xFF334155)),
                 ) {
-                    Image(
-                        painter = painterResource(id = R.drawable.img_jarvis_core),
-                        contentDescription = stringResource(R.string.cd_jarvis_core),
-                        contentScale = ContentScale.Crop,
-                        modifier = Modifier.fillMaxSize(),
-                    )
+                    Box(contentAlignment = Alignment.Center) {
+                        Text(
+                            text = "J",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = Color(0xFFF1F5F9),
+                        )
+                    }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
@@ -1171,10 +1483,10 @@ private fun OverlayCardContent(
                             state.isListening -> "Dinleniyor…"
                             state.isProcessing -> "Düşünüyor…"
                             state.activeProfileLabel.isNotBlank() -> "Profil: ${state.activeProfileLabel}"
-                            else -> "Hızlı Komut Penceresi"
+                            else -> "Hızlı Komut"
                         },
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (state.isListening) JarvisCrimson else JarvisCyan,
+                        color = if (state.isListening) JarvisCrimson else Color(0xFF94A3B8),
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -1205,6 +1517,14 @@ private fun OverlayCardContent(
                         },
                         contentDescription = "Sesli okuma aç veya kapat",
                         tint = if (state.ttsEnabled) JarvisCyan else Color(0xFF94A3B8),
+                    )
+                }
+
+                IconButton(onClick = onDisableCompletely) {
+                    Icon(
+                        imageVector = Icons.Rounded.PowerSettingsNew,
+                        contentDescription = "Baloncuğu ve servisi tamamen kapat",
+                        tint = JarvisCrimson,
                     )
                 }
 
