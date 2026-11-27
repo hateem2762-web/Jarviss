@@ -1,0 +1,117 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("/fonts/space_grotesk.ttf") format("truetype");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Inter";
+  src: url("/fonts/inter.ttf") format("truetype");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("/fonts/jetbrains_mono.ttf") format("truetype");
+  font-weight: 400 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root {
+  --jarvis-bg: #f6f8fb;
+  --jarvis-surface: #ffffff;
+  --jarvis-surface-variant: #edf1f7;
+  --jarvis-outline: #d8e0ec;
+  --jarvis-outline-variant: #e2e8f0;
+  --jarvis-on-surface: #0f172a;
+  --jarvis-on-surface-muted: #526075;
+  --jarvis-primary: #0284c7;
+  --jarvis-on-primary: #ffffff;
+  --jarvis-primary-container: #e0f2fe;
+  --jarvis-on-primary-container: #0c4a6e;
+  --jarvis-secondary: #d97706;
+  --jarvis-tertiary: #059669;
+  --jarvis-error: #e11d48;
+  --jarvis-error-container: #ffe4e6;
+  --jarvis-on-error-container: #881337;
+}
+
+.dark {
+  --jarvis-bg: #090b0f;
+  --jarvis-surface: #101319;
+  --jarvis-surface-variant: #171c26;
+  --jarvis-outline: #232b38;
+  --jarvis-outline-variant: #1d2430;
+  --jarvis-on-surface: #f1f5f9;
+  --jarvis-on-surface-muted: #8b97aa;
+  --jarvis-primary: #38bdf8;
+  --jarvis-on-primary: #090b0f;
+  --jarvis-primary-container: #0c2d48;
+  --jarvis-on-primary-container: #bae6fd;
+  --jarvis-secondary: #fbbf24;
+  --jarvis-tertiary: #34d399;
+  --jarvis-error: #fb7185;
+  --jarvis-error-container: #3a0e1b;
+  --jarvis-on-error-container: #fecdd3;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: var(--jarvis-bg);
+  color: var(--jarvis-on-surface);
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.font-display {
+  font-family: "Space Grotesk", system-ui, sans-serif;
+}
+
+.font-mono-hud {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+.chat-fade-mask {
+  mask-image: linear-gradient(to bottom, transparent 0%, rgba(0, 0, 0, 0.75) 10%, black 22%, black 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0%, rgba(0, 0, 0, 0.75) 10%, black 22%, black 100%);
+}
+
+@keyframes jarvis-ticker-scroll {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.jarvis-ticker-track {
+  display: flex;
+  width: max-content;
+  animation: jarvis-ticker-scroll 38s linear infinite;
+}
+
+.jarvis-ticker-wrap:hover .jarvis-ticker-track {
+  animation-play-state: paused;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-ticker-track {
+    animation: none;
+  }
+}
