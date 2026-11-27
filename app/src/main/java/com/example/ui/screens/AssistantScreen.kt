@@ -35,17 +35,19 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AccessibilityNew
-import androidx.compose.material.icons.rounded.Alarm
-import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
-import androidx.compose.material.icons.rounded.PowerSettingsNew
-import androidx.compose.material.icons.rounded.RecordVoiceOver
+import androidx.compose.material.icons.rounded.PlayCircle
+import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Shield
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -75,6 +77,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.example.R
@@ -87,18 +90,18 @@ import com.example.model.ProactiveAlertItem
 import com.example.news.NewsBriefingStage
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.ui.JarvisUiState
+import com.example.ui.components.CinematicAiEditStage
 import com.example.ui.components.JarvisHudHeader
-import com.example.ui.components.JarvisTopHudBar
 import com.example.ui.components.LiveSubtitleDisplay
 import com.example.ui.components.MinimalistChatStreamView
 import com.example.ui.components.ParticleNebulaCanvas
 import com.example.ui.components.ProactiveAlertCard
-import com.example.ui.components.VisualCueStage
 import com.example.ui.components.VoiceOrbButton
 import com.example.ui.components.WebAgentCard
 import com.example.ui.components.resolveMoodAccentColor
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCyan
+import com.example.ui.theme.JetBrainsMonoFontFamily
 import kotlin.math.sin
 import kotlinx.coroutines.delay
 
@@ -110,9 +113,9 @@ private data class QuickCommandPrompt(
 
 private val StarterCommands = listOf(
     QuickCommandPrompt("Ekranı not al", "Bu ekranı not al", Icons.Rounded.EditNote),
+    QuickCommandPrompt("Spotify'da çal", "Spotify'da Duman aç", Icons.Rounded.PlayCircle),
+    QuickCommandPrompt("Gündem bülteni", "Gündemde ne var?", Icons.Rounded.Public),
     QuickCommandPrompt("Feneri aç", "Feneri aç", Icons.Rounded.FlashlightOn),
-    QuickCommandPrompt("3 dk hatırlatıcı", "3 dakika sonra kontrol etmeyi hatırlat", Icons.Rounded.Alarm),
-    QuickCommandPrompt("Pil durumu", "Şarjım kaç?", Icons.Rounded.BatteryChargingFull),
 )
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -154,11 +157,21 @@ fun AssistantScreen(
     onDismissWebAgent: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    val isSpeakingCinematic = uiState.speakingMessageId != null && !uiState.newsBriefing.isVisible
+
+    BackHandler(enabled = isSpeakingCinematic) {
+        val latestBot = uiState.messages.lastOrNull { !it.isUser }
+        if (latestBot != null) {
+            onToggleSpeakMessage(latestBot)
+        }
+    }
+
     BackHandler(enabled = uiState.newsBriefing.isVisible) {
         onCloseNews()
     }
 
     var inputText by rememberSaveable { mutableStateOf("") }
+    var showPermissionSheet by remember { mutableStateOf(false) }
     val combinedError = uiState.errorMessage ?: uiState.voiceState.errorMessage
 
     val latestBotMessage = remember(uiState.messages) {
@@ -206,7 +219,7 @@ fun AssistantScreen(
             return@LaunchedEffect
         }
         var t = 0f
-        while (uiState.speakingMessageId != null) {
+        while (true) {
             t += 0.25f
             ttsCadenceRms = (0.28f + 0.25f * kotlin.math.abs(sin(t)) + 0.14f * kotlin.math.abs(sin(t * 2.3f)))
                 .coerceIn(0.15f, 0.72f)
@@ -247,395 +260,412 @@ fun AssistantScreen(
     }
     val accentColor = resolveMoodAccentColor(visualState, effectiveMood)
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
-        JarvisTopHudBar(
-            isListening = uiState.voiceState.isListening,
-            isProcessing = uiState.isProcessing,
-            hasUserContext = uiState.preferences.userContext.isNotBlank(),
-            hasMessages = uiState.messages.isNotEmpty(),
-            onContextClick = onContextClick,
-            onClearChat = onClearChat,
-        )
+    val needsNotifListenerSetup = uiState.preferences.proactiveAlertsEnabled &&
+        !hasNotificationListenerPermission
+    val hasMissingPermissions = !hasOverlayPermission || !hasMicPermission || !hasAccessibilityPermission || needsNotifListenerSetup
 
-        val needsNotifListenerSetup = uiState.preferences.proactiveAlertsEnabled &&
-            !hasNotificationListenerPermission
-
-        if (!hasOverlayPermission || !hasMicPermission || !hasAccessibilityPermission || needsNotifListenerSetup) {
-            PermissionOnboardingCard(
-                hasOverlayPermission = hasOverlayPermission,
-                hasMicPermission = hasMicPermission,
-                hasAccessibilityPermission = hasAccessibilityPermission,
-                showNotificationListenerButton = needsNotifListenerSetup,
-                onRequestOverlayPermission = onRequestOverlayPermission,
-                onRequestMicPermission = onRequestMicPermission,
-                onOpenAccessibilitySettings = onOpenAccessibilitySettings,
-                onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
-                modifier = Modifier
-                    .widthIn(max = 720.dp)
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-            )
-        }
-
-        val anyOverlayActive = uiState.preferences.floatingBubbleEnabled ||
-            uiState.preferences.persistentTriggerEnabled ||
-            uiState.preferences.wakeWordEnabled
-
-        if (hasOverlayPermission || anyOverlayActive) {
-            Row(
-                modifier = Modifier
-                    .widthIn(max = 720.dp)
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                if (anyOverlayActive) {
-                    OutlinedButton(
-                        onClick = onDisableAllOverlays,
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("assistant_disable_overlays_button"),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.PowerSettingsNew,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text("Kapat", style = MaterialTheme.typography.labelSmall)
-                    }
+    // Permissions Dialog on demand (keeps main screen 100% clean)
+    if (showPermissionSheet) {
+        AlertDialog(
+            onDismissRequest = { showPermissionSheet = false },
+            confirmButton = {
+                TextButton(onClick = { showPermissionSheet = false }) {
+                    Text("Kapat", color = MaterialTheme.colorScheme.primary)
                 }
-
-                if (hasOverlayPermission) {
-                    OutlinedButton(
-                        onClick = { onToggleWakeWord(!uiState.preferences.wakeWordEnabled) },
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .testTag("assistant_wake_word_button"),
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                        border = BorderStroke(
-                            1.dp,
-                            if (uiState.preferences.wakeWordEnabled) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.outlineVariant
-                            },
-                        ),
-                    ) {
-                        Icon(
-                            imageVector = Icons.Rounded.RecordVoiceOver,
-                            contentDescription = null,
-                            modifier = Modifier.size(15.dp),
-                            tint = if (uiState.preferences.wakeWordEnabled) {
-                                MaterialTheme.colorScheme.primary
-                            } else {
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            },
-                        )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Text(
-                            text = if (uiState.preferences.wakeWordEnabled) "\"Jarvis\": Açık" else "\"Jarvis\" Dinle",
-                            style = MaterialTheme.typography.labelSmall,
-                        )
-                    }
-
-                    Surface(
-                        shape = RoundedCornerShape(12.dp),
-                        color = MaterialTheme.colorScheme.surfaceVariant,
-                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outline),
-                        modifier = Modifier
-                            .minimumInteractiveComponentSize()
-                            .clip(RoundedCornerShape(12.dp))
-                            .clickable(onClick = onLaunchOverlay)
-                            .testTag("launch_overlay_button"),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.PictureInPictureAlt,
-                                contentDescription = null,
-                                tint = JarvisCyan,
-                                modifier = Modifier.size(15.dp),
-                            )
-                            Text(
-                                text = "Kayan Pencere",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurface,
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        AnimatedContent(
-            targetState = uiState.newsBriefing.isVisible,
-            modifier = Modifier
-                .weight(1f)
-                .widthIn(max = 720.dp)
-                .fillMaxWidth(),
-            transitionSpec = {
-                fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(200))
             },
-            label = "assistant_news_stage_transition",
-        ) { inNewsMode ->
-            if (inNewsMode) {
-                Column(
+            title = {
+                Text(
+                    text = "SİSTEM İZİNLERİ",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontFamily = JetBrainsMonoFontFamily,
+                        fontWeight = FontWeight.Bold,
+                    ),
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            },
+            text = {
+                PermissionOnboardingCard(
+                    hasOverlayPermission = hasOverlayPermission,
+                    hasMicPermission = hasMicPermission,
+                    hasAccessibilityPermission = hasAccessibilityPermission,
+                    showNotificationListenerButton = needsNotifListenerSetup,
+                    onRequestOverlayPermission = onRequestOverlayPermission,
+                    onRequestMicPermission = onRequestMicPermission,
+                    onOpenAccessibilitySettings = onOpenAccessibilitySettings,
+                    onOpenNotificationListenerSettings = onOpenNotificationListenerSettings,
+                )
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+        )
+    }
+
+    AnimatedContent(
+        targetState = isSpeakingCinematic,
+        transitionSpec = {
+            fadeIn(animationSpec = tween(300)) togetherWith fadeOut(animationSpec = tween(220))
+        },
+        label = "assistant_cinematic_scene_transition",
+    ) { speakingActive ->
+        if (speakingActive) {
+            // Fullscreen Cinematic "AI Edit" Motion Scene during Speech
+            CinematicAiEditStage(
+                spokenText = latestBotMessage?.text ?: liveSubtitleText,
+                topicTitle = dynamicHeader,
+                visualCues = uiState.visualCues,
+                mood = effectiveMood,
+                ttsCadenceRms = effectiveRms,
+                onStopSpeaking = {
+                    latestBotMessage?.let { onToggleSpeakMessage(it) }
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+        } else {
+            // Ultra-Clean, De-Cluttered Minimalist Canvas
+            Column(
+                modifier = modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.background),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // Top Minimalist HUD Bar
+                MinimalistTopHudBar(
+                    topicHeader = dynamicHeader,
+                    visualState = visualState,
+                    mood = effectiveMood,
+                    hasMissingPermissions = hasMissingPermissions,
+                    onOpenPermissions = { showPermissionSheet = true },
+                    onLaunchOverlay = onLaunchOverlay,
+                    onContextClick = onContextClick,
+                    hasMessages = uiState.messages.isNotEmpty(),
+                    onClearChat = onClearChat,
+                )
+
+                AnimatedContent(
+                    targetState = uiState.newsBriefing.isVisible,
                     modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
-                    verticalArrangement = Arrangement.Center,
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    NewsBriefingStage(
-                        state = uiState.newsBriefing,
-                        compactOverlay = false,
-                        onSelectIndex = onSelectNewsIndex,
-                        onTogglePauseTts = onToggleNewsTtsPause,
-                        onToggleDetail = onToggleNewsDetail,
-                        onRefresh = onRefreshNews,
-                        onClose = onCloseNews,
-                    )
-                }
-            } else {
-                Column(
-                    modifier = Modifier.fillMaxSize(),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                ) {
-                    // Dynamic HUD Core (Header + Particle Nebula + Live Subtitles)
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = 6.dp, bottom = 6.dp),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        JarvisHudHeader(
-                            topicHeader = dynamicHeader,
-                            visualState = visualState,
-                            mood = effectiveMood,
-                        )
-
-                        val voiceOrbDesc = stringResource(R.string.cd_voice_input)
-                        val showVisualCues = uiState.visualCues.isNotEmpty() && !uiState.newsBriefing.isVisible
-                        Row(
-                            horizontalArrangement = Arrangement.spacedBy(14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            val orbSize = when {
-                                showVisualCues -> 152.dp
-                                uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty() -> 210.dp
-                                else -> 168.dp
-                            }
-                            Box(
-                                modifier = Modifier
-                                    .size(orbSize)
-                                    .clip(RoundedCornerShape(120.dp))
-                                    .semantics { contentDescription = voiceOrbDesc }
-                                    .clickable(onClick = onVoiceOrbClick)
-                                    .testTag("jarvis_particle_nebula"),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                ParticleNebulaCanvas(
-                                    visualState = visualState,
-                                    mood = effectiveMood,
-                                    rmsLevel = effectiveRms,
-                                    compactMode = false,
-                                    modifier = Modifier.fillMaxSize(),
-                                )
-                            }
-
-                            AnimatedVisibility(visible = showVisualCues) {
-                                VisualCueStage(
-                                    cues = uiState.visualCues,
-                                    accentColor = accentColor,
-                                    isActive = visualState == JarvisVisualState.SPEAKING || uiState.isProcessing,
-                                    compactOverlay = false,
-                                )
-                            }
-                        }
-
-                        LiveSubtitleDisplay(
-                            subtitleText = liveSubtitleText,
-                            subtitleKey = liveSubtitleKey,
-                            visualState = visualState,
-                            mood = effectiveMood,
-                            modifier = Modifier.heightIn(min = 38.dp),
-                        )
-
-                        AnimatedVisibility(visible = uiState.webAgentState.isVisible) {
-                            WebAgentCard(
-                                state = uiState.webAgentState,
-                                onConfirmDownload = onConfirmWebDownload,
-                                onOpenDownloadedFile = onOpenWebDownload,
-                                onDismiss = onDismissWebAgent,
-                                compactOverlay = false,
-                                modifier = Modifier.padding(horizontal = 16.dp),
-                            )
-                        }
-                    }
-
-                    // Active Proactive WhatsApp Alerts (if any)
-                    if (uiState.proactiveAlerts.isNotEmpty()) {
+                        .weight(1f)
+                        .widthIn(max = 720.dp)
+                        .fillMaxWidth(),
+                    transitionSpec = {
+                        fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(200))
+                    },
+                    label = "assistant_news_stage_transition",
+                ) { inNewsMode ->
+                    if (inNewsMode) {
                         Column(
                             modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(max = 210.dp)
+                                .fillMaxSize()
                                 .verticalScroll(rememberScrollState())
-                                .padding(horizontal = 16.dp, vertical = 4.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            uiState.proactiveAlerts.forEach { alert ->
-                                ProactiveAlertCard(
-                                    alert = alert,
-                                    hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
-                                    onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
-                                    onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
-                                    onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
-                                    onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
-                                    onDismiss = { onDismissProactiveAlert(alert.id) },
-                                )
-                            }
+                            NewsBriefingStage(
+                                state = uiState.newsBriefing,
+                                compactOverlay = false,
+                                onSelectIndex = onSelectNewsIndex,
+                                onTogglePauseTts = onToggleNewsTtsPause,
+                                onToggleDetail = onToggleNewsDetail,
+                                onRefresh = onRefreshNews,
+                                onClose = onCloseNews,
+                            )
                         }
-                    }
-
-                    // Translucent Bubble-Free Minimalist Chat Stream (RecyclerView) OR Starter Chips
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .fillMaxWidth(),
-                        contentAlignment = Alignment.BottomCenter,
-                    ) {
-                        if (uiState.messages.isEmpty()) {
-                            FlowRow(
+                    } else {
+                        Column(
+                            modifier = Modifier.fillMaxSize(),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            // Centered Breathing Particle Nebula & Frameless Live Subtitles
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 20.dp, vertical = 14.dp),
-                                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    .padding(top = 8.dp, bottom = 6.dp),
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
                             ) {
-                                StarterCommands.forEachIndexed { index, item ->
-                                    Surface(
-                                        shape = RoundedCornerShape(14.dp),
-                                        color = MaterialTheme.colorScheme.surface,
-                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                                        modifier = Modifier
-                                            .minimumInteractiveComponentSize()
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .clickable { onSendCommand(item.command) }
-                                            .testTag("quick_command_chip_$index"),
-                                    ) {
-                                        Row(
-                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                            verticalAlignment = Alignment.CenterVertically,
-                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                                        ) {
-                                            Icon(
-                                                imageVector = item.icon,
-                                                contentDescription = null,
-                                                tint = accentColor,
-                                                modifier = Modifier.size(16.dp),
-                                            )
-                                            Text(
-                                                text = item.label,
-                                                style = MaterialTheme.typography.labelLarge,
-                                                color = MaterialTheme.colorScheme.onSurface,
-                                            )
-                                        }
+                                val voiceOrbDesc = stringResource(R.string.cd_voice_input)
+                                val orbSize = if (uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty()) 210.dp else 168.dp
+
+                                Box(
+                                    modifier = Modifier
+                                        .size(orbSize)
+                                        .clip(RoundedCornerShape(120.dp))
+                                        .semantics { contentDescription = voiceOrbDesc }
+                                        .clickable(onClick = onVoiceOrbClick)
+                                        .testTag("jarvis_particle_nebula"),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    ParticleNebulaCanvas(
+                                        visualState = visualState,
+                                        mood = effectiveMood,
+                                        rmsLevel = effectiveRms,
+                                        compactMode = false,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
+
+                                LiveSubtitleDisplay(
+                                    subtitleText = liveSubtitleText,
+                                    subtitleKey = liveSubtitleKey,
+                                    visualState = visualState,
+                                    mood = effectiveMood,
+                                    modifier = Modifier.heightIn(min = 38.dp),
+                                )
+
+                                AnimatedVisibility(visible = uiState.webAgentState.isVisible) {
+                                    WebAgentCard(
+                                        state = uiState.webAgentState,
+                                        onConfirmDownload = onConfirmWebDownload,
+                                        onOpenDownloadedFile = onOpenWebDownload,
+                                        onDismiss = onDismissWebAgent,
+                                        compactOverlay = false,
+                                        modifier = Modifier.padding(horizontal = 16.dp),
+                                    )
+                                }
+                            }
+
+                            // Active Proactive WhatsApp Alerts (if any)
+                            if (uiState.proactiveAlerts.isNotEmpty()) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 210.dp)
+                                        .verticalScroll(rememberScrollState())
+                                        .padding(horizontal = 16.dp, vertical = 4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                ) {
+                                    uiState.proactiveAlerts.forEach { alert ->
+                                        ProactiveAlertCard(
+                                            alert = alert,
+                                            hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
+                                            onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
+                                            onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
+                                            onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
+                                            onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
+                                            onDismiss = { onDismissProactiveAlert(alert.id) },
+                                        )
                                     }
                                 }
                             }
-                        } else {
-                            MinimalistChatStreamView(
-                                messages = uiState.messages,
-                                accentColor = accentColor,
-                                speakingMessageId = uiState.speakingMessageId,
-                                onRunAction = onRunAction,
-                                onCopyMessage = onCopyMessage,
-                                onToggleSpeakMessage = onToggleSpeakMessage,
-                                modifier = Modifier.fillMaxSize(),
-                            )
-                        }
-                    }
-                }
-            }
-        }
 
-        AnimatedVisibility(visible = combinedError != null) {
-            if (combinedError != null) {
-                Surface(
-                    modifier = Modifier
-                        .widthIn(max = 720.dp)
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 6.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.errorContainer,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            text = combinedError,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (uiState.lastFailedPrompt != null && !uiState.isProcessing) {
-                            TextButton(
-                                onClick = onRetry,
+                            // Translucent Bubble-Free Minimalist Chat Stream OR Starter Chips
+                            Box(
                                 modifier = Modifier
-                                    .minimumInteractiveComponentSize()
-                                    .testTag("retry_command_button"),
+                                    .weight(1f)
+                                    .fillMaxWidth(),
+                                contentAlignment = Alignment.BottomCenter,
                             ) {
-                                Text(
-                                    text = "Tekrar Dene",
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                )
+                                if (uiState.messages.isEmpty()) {
+                                    FlowRow(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(horizontal = 20.dp, vertical = 14.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                                    ) {
+                                        StarterCommands.forEachIndexed { index, item ->
+                                            Surface(
+                                                shape = RoundedCornerShape(14.dp),
+                                                color = MaterialTheme.colorScheme.surface,
+                                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                                modifier = Modifier
+                                                    .minimumInteractiveComponentSize()
+                                                    .clip(RoundedCornerShape(14.dp))
+                                                    .clickable { onSendCommand(item.command) }
+                                                    .testTag("quick_command_chip_$index"),
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                ) {
+                                                    Icon(
+                                                        imageVector = item.icon,
+                                                        contentDescription = null,
+                                                        tint = accentColor,
+                                                        modifier = Modifier.size(16.dp),
+                                                    )
+                                                    Text(
+                                                        text = item.label,
+                                                        style = MaterialTheme.typography.labelLarge,
+                                                        color = MaterialTheme.colorScheme.onSurface,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    MinimalistChatStreamView(
+                                        messages = uiState.messages,
+                                        accentColor = accentColor,
+                                        speakingMessageId = uiState.speakingMessageId,
+                                        onRunAction = onRunAction,
+                                        onCopyMessage = onCopyMessage,
+                                        onToggleSpeakMessage = onToggleSpeakMessage,
+                                        modifier = Modifier.fillMaxSize(),
+                                    )
+                                }
                             }
                         }
-                        IconButton(
-                            onClick = onDismissError,
-                            modifier = Modifier.minimumInteractiveComponentSize(),
+                    }
+                }
+
+                AnimatedVisibility(visible = combinedError != null) {
+                    if (combinedError != null) {
+                        Surface(
+                            modifier = Modifier
+                                .widthIn(max = 720.dp)
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 6.dp),
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.errorContainer,
                         ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Close,
-                                contentDescription = "Hatayı kapat",
-                                tint = MaterialTheme.colorScheme.onErrorContainer,
-                            )
+                            Row(
+                                modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = combinedError,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                if (uiState.lastFailedPrompt != null && !uiState.isProcessing) {
+                                    TextButton(
+                                        onClick = onRetry,
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .testTag("retry_command_button"),
+                                    ) {
+                                        Text(
+                                            text = "Tekrar Dene",
+                                            color = MaterialTheme.colorScheme.onErrorContainer,
+                                        )
+                                    }
+                                }
+                                IconButton(
+                                    onClick = onDismissError,
+                                    modifier = Modifier.minimumInteractiveComponentSize(),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Close,
+                                        contentDescription = "Hatayı kapat",
+                                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                                    )
+                                }
+                            }
                         }
                     }
                 }
+
+                CommandDock(
+                    inputText = inputText,
+                    onInputChange = { inputText = it },
+                    isListening = uiState.voiceState.isListening,
+                    rmsLevel = uiState.voiceState.rmsLevel,
+                    isProcessing = uiState.isProcessing,
+                    onSend = {
+                        val toSend = inputText.trim()
+                        if (toSend.isNotEmpty()) {
+                            onSendCommand(toSend)
+                            inputText = ""
+                        }
+                    },
+                    onVoiceOrbClick = onVoiceOrbClick,
+                    modifier = Modifier.widthIn(max = 720.dp),
+                )
             }
         }
+    }
+}
 
-        CommandDock(
-            inputText = inputText,
-            onInputChange = { inputText = it },
-            isListening = uiState.voiceState.isListening,
-            rmsLevel = uiState.voiceState.rmsLevel,
-            isProcessing = uiState.isProcessing,
-            onSend = {
-                val toSend = inputText.trim()
-                if (toSend.isNotEmpty()) {
-                    onSendCommand(toSend)
-                    inputText = ""
-                }
-            },
-            onVoiceOrbClick = onVoiceOrbClick,
-            modifier = Modifier.widthIn(max = 720.dp),
+@Composable
+private fun MinimalistTopHudBar(
+    topicHeader: String,
+    visualState: JarvisVisualState,
+    mood: JarvisMood,
+    hasMissingPermissions: Boolean,
+    onOpenPermissions: () -> Unit,
+    onLaunchOverlay: () -> Unit,
+    onContextClick: () -> Unit,
+    hasMessages: Boolean,
+    onClearChat: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        JarvisHudHeader(
+            topicHeader = topicHeader,
+            visualState = visualState,
+            mood = mood,
+            modifier = Modifier.weight(1f, fill = false),
         )
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (hasMissingPermissions) {
+                IconButton(
+                    onClick = onOpenPermissions,
+                    modifier = Modifier
+                        .size(36.dp)
+                        .testTag("grant_permission_badge"),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Shield,
+                        contentDescription = "İzinler",
+                        tint = JarvisAmber,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+
+            IconButton(
+                onClick = onLaunchOverlay,
+                modifier = Modifier
+                    .size(36.dp)
+                    .testTag("launch_overlay_button"),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.PictureInPictureAlt,
+                    contentDescription = "Kayan Pencere",
+                    tint = JarvisCyan,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            IconButton(
+                onClick = onContextClick,
+                modifier = Modifier.size(36.dp),
+            ) {
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = "Kullanıcı Bağlamı",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+
+            if (hasMessages) {
+                IconButton(
+                    onClick = onClearChat,
+                    modifier = Modifier.size(36.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.DeleteSweep,
+                        contentDescription = "Sohbeti Temizle",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
     }
 }
 

@@ -25,6 +25,9 @@ object LocalQuickCommandMatcher {
         // 0.7 Global Air Gesture Camera Scroll Control ("el kontrolünü kapat/aç", "el hareketiyle kaydırmayı durdur")
         matchGlobalAirGestureCommand(norm)?.let { return it }
 
+        // 0.8 Universal In-App Media Search & Auto-Play ("Spotify'da Duman aç", "YouTube'da bilim videosu başlat")
+        matchOpenAndPlayContent(rawPrompt, norm)?.let { return it }
+
         // 1. Natural language News / Briefing triggers (general or topic-specific)
         matchNewsRequest(rawPrompt = rawPrompt, norm = norm)?.let { return it }
 
@@ -147,6 +150,61 @@ object LocalQuickCommandMatcher {
         return JarvisAction(
             intent = ActionIntent.AIR_GESTURE_CONTROL,
             target = target,
+        )
+    }
+
+    private fun matchOpenAndPlayContent(rawPrompt: String, norm: String): JarvisAction? {
+        val trimmed = norm
+            .removePrefix("hey jarvis ")
+            .removePrefix("jarvis ")
+            .trim()
+
+        val wantsPlayOrOpen = trimmed.endsWith("ac") ||
+            trimmed.endsWith("baslat") ||
+            trimmed.endsWith("cal") ||
+            trimmed.endsWith("oynat") ||
+            trimmed.contains("acarmisin") ||
+            trimmed.contains("calarmisin") ||
+            trimmed.contains("baslatirmisin") ||
+            trimmed.contains("oynatirmisin") ||
+            trimmed.contains("dinlet") ||
+            trimmed.contains("izlet")
+
+        if (!wantsPlayOrOpen) return null
+
+        val app = when {
+            trimmed.startsWith("spotify") || trimmed.contains("spotify da") || trimmed.contains("spotifydan") -> "spotify"
+            trimmed.startsWith("youtube") || trimmed.contains("youtube da") || trimmed.contains("youtubedan") -> "youtube"
+            trimmed.startsWith("tiktok") || trimmed.contains("tiktok ta") || trimmed.contains("tiktoktan") -> "tiktok"
+            trimmed.startsWith("bana") && (trimmed.contains("muzik") || trimmed.contains("sarki") || trimmed.contains("video") || trimmed.contains("bir seyler") || trimmed.contains("modum")) -> "default"
+            trimmed.contains("muzik cal") || trimmed.contains("sarki cal") || trimmed.contains("sarki ac") || trimmed.contains("muzik ac") -> "default"
+            else -> return null
+        }
+
+        var query = rawPrompt
+            .replace(Regex("""^(?:hey\s+)?jarvis[\s,:]*""", RegexOption.IGNORE_CASE), "")
+            .trim()
+
+        query = query
+            .replace(Regex("""^spotify(?:'?[td][ae]|'?[td]an)?\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""^youtube(?:'?[td][ae]|'?[td]an)?\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""^tiktok(?:'?[td][ae]|'?[td]an)?\s*""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""^bana\s+""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""\s*(?:aç|ac|başlat|baslat|çal|cal|oynat|dinlet|izlet|lütfen|lutfen)(?:armısın|armisin|ıver|iver)?$""", RegexOption.IGNORE_CASE), "")
+            .trim()
+
+        if (query.isBlank()) {
+            query = when (app) {
+                "spotify" -> "en sevilen şarkılar"
+                "youtube" -> "trend videolar"
+                "tiktok" -> "eğlenceli videolar"
+                else -> "popüler müzik"
+            }
+        }
+
+        return JarvisAction(
+            intent = ActionIntent.OPEN_AND_PLAY_CONTENT,
+            target = "$app:$query",
         )
     }
 

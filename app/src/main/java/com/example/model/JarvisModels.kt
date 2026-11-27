@@ -27,6 +27,7 @@ enum class ActionIntent(val wireValue: String, val displayLabel: String) {
     WEB_DOWNLOAD_AGENT("web_download_agent", "Web İndirme Ajanı"),
     SCHEDULE_MESSAGE("schedule_message", "Zamanlı Mesaj"),
     AIR_GESTURE_CONTROL("air_gesture_control", "El Kontrolü"),
+    OPEN_AND_PLAY_CONTENT("open_and_play_content", "İçerik Başlat"),
     NONE("none", "Yanıt");
 
     companion object {
@@ -307,6 +308,7 @@ object HudTopicResolver {
             latestActionIntent == ActionIntent.SCHEDULE_MESSAGE -> "OTOMASYON // ZAMANLI MESAJ"
             latestActionIntent == ActionIntent.WEB_DOWNLOAD_AGENT -> "WEB AJANI // İNDİRME"
             latestActionIntent == ActionIntent.AIR_GESTURE_CONTROL -> "EL KONTROLÜ // KAMERA"
+            latestActionIntent == ActionIntent.OPEN_AND_PLAY_CONTENT -> "MEDYA // OYNATICI"
             latestActionIntent == ActionIntent.OPEN_NEWS_BRIEFING ||
                 latestActionIntent == ActionIntent.NEWS_CONTROL -> "JARVIS // GÜNDEM"
             latestActionIntent in setOf(
@@ -334,7 +336,8 @@ object HudTopicResolver {
             ActionIntent.TAP_COORDINATE,
             ActionIntent.TORCH_CONTROL,
             ActionIntent.SEARCH_YOUTUBE,
-            ActionIntent.AIR_GESTURE_CONTROL -> JarvisMood.ENERGETIC
+            ActionIntent.AIR_GESTURE_CONTROL,
+            ActionIntent.OPEN_AND_PLAY_CONTENT -> JarvisMood.ENERGETIC
             ActionIntent.SET_REMINDER,
             ActionIntent.SCHEDULE_MESSAGE,
             ActionIntent.OPEN_SYSTEM_SETTINGS,

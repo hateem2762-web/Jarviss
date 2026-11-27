@@ -383,6 +383,79 @@ class JarvisAccessibilityService : AccessibilityService() {
         return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
+    /**
+     * Waits for the opened media app (Spotify, YouTube, TikTok, etc.) to settle,
+     * scans the window for the first playable item / card / play button, and clicks it.
+     */
+    suspend fun autoPlayFirstResult(targetPackage: String): Boolean = withContext(Dispatchers.Main) {
+        delay(1_700L)
+
+        val (screenW, screenH) = getRealScreenSize(this@JarvisAccessibilityService)
+        val candidateRoots = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            rootInActiveWindow?.let { candidateRoots.add(it) }
+        } catch (_: Exception) {}
+
+        if (candidateRoots.isEmpty()) {
+            windows?.forEach { win ->
+                win.root?.let { candidateRoots.add(it) }
+            }
+        }
+
+        if (candidateRoots.isEmpty()) return@withContext false
+
+        val playKeywords = listOf("play", "oynat", "dinle", "listen", "çal", "cal", "izle", "watch")
+        for (root in candidateRoots) {
+            val playNode = findNodeMatching(root) { node ->
+                val desc = node.contentDescription?.toString()?.lowercase(Locale.ROOT).orEmpty()
+                val text = node.text?.toString()?.lowercase(Locale.ROOT).orEmpty()
+                val isPlay = playKeywords.any { kw -> desc.contains(kw) || text.contains(kw) }
+                isPlay && (node.isClickable || node.parent?.isClickable == true)
+            }
+            if (playNode != null) {
+                val targetToClick = if (playNode.isClickable) playNode else playNode.parent
+                val clicked = targetToClick?.performAction(AccessibilityNodeInfo.ACTION_CLICK) ?: false
+                if (clicked) {
+                    Log.d(TAG, "autoPlayFirstResult: clicked playNode in $targetPackage")
+                    return@withContext true
+                }
+            }
+        }
+
+        val rect = Rect()
+        for (root in candidateRoots) {
+            val contentNode = findNodeMatching(root) { node ->
+                if (!node.isClickable) return@findNodeMatching false
+                node.getBoundsInScreen(rect)
+                val isReasonableSize = rect.width() > screenW * 0.35f && rect.height() > 80
+                val isInContentArea = rect.top >= (screenH * 0.16f) && rect.bottom <= (screenH * 0.72f)
+                isReasonableSize && isInContentArea
+            }
+            if (contentNode != null) {
+                val clicked = contentNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) {
+                    Log.d(TAG, "autoPlayFirstResult: clicked content card in $targetPackage")
+                    return@withContext true
+                }
+            }
+        }
+
+        return@withContext dispatchTapAtPercent(0.50f, 0.32f)
+    }
+
+    private fun findNodeMatching(
+        node: AccessibilityNodeInfo,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+    ): AccessibilityNodeInfo? {
+        if (predicate(node)) return node
+        for (i in 0 until node.childCount) {
+            val child = node.getChild(i) ?: continue
+            val found = findNodeMatching(child, predicate)
+            if (found != null) return found
+        }
+        return null
+    }
+
     suspend fun executeScheduledMessageAutomation(
         targetPackage: String,
         targetAppName: String,

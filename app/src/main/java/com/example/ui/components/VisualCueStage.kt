@@ -218,7 +218,7 @@ private fun DrawScope.drawCueHudBackdrop(accent: Color, pulse: Float) {
     drawLine(c, Offset(size.width - 2f, size.height - 2f), Offset(size.width - 2f, size.height - 2f - b), stroke)
 }
 
-private fun DrawScope.drawVisualCueVector(
+internal fun DrawScope.drawVisualCueVector(
     cueKey: String,
     accent: Color,
     pulse: Float,

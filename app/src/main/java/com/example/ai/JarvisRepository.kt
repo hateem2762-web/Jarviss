@@ -86,12 +86,13 @@ class JarvisRepository {
                     "web_download_agent",
                     "schedule_message",
                     "air_gesture_control",
+                    "open_and_play_content",
                     "none"
                 ),
                 description = "Aksiyon niyeti."
             ),
             "target" to Schema.string(
-                description = "open_app için uygulama adı; open_url için URL; search_youtube için sorgu; tap_coordinate için kayıtlı etiket; torch_control için 'on'|'off'|'toggle'; volume_control için '<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>'; open_system_settings için 'wifi'|'bluetooth'|'sound'|'accessibility'|'notifications'|'battery'|'display'|'location'|'settings'; open_news_briefing için genel gündemde boş string '', belirli bir konu/takım/kişi/alan istendiyse sadece temiz arama konusu (ör. 'Beşiktaş', 'ekonomi', 'yapay zeka'); news_control için 'next'|'previous'|'detail'|'pause'|'resume'|'close'; web_download_agent için aranacak/indirilecek site URL'si, uygulama veya dosya adı (ör. 'F-Droid APK', 'https://f-droid.org'); schedule_message için '<uygulama>:<virgülle_alıcılar>:<HH:MM>' (ör. 'TikTok:Ahmet,Ayşe:23:00'); air_gesture_control için 'on'|'off'|'on_video'|'on_all'; diğerlerinde boş string."
+                description = "open_app için uygulama adı; open_url için URL; search_youtube için sorgu; tap_coordinate için kayıtlı etiket; torch_control için 'on'|'off'|'toggle'; volume_control için '<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>'; open_system_settings için 'wifi'|'bluetooth'|'sound'|'accessibility'|'notifications'|'battery'|'display'|'location'|'settings'; open_news_briefing için genel gündemde boş string '', belirli bir konu/takım/kişi/alan istendiyse sadece temiz arama konusu (ör. 'Beşiktaş', 'ekonomi', 'yapay zeka'); news_control için 'next'|'previous'|'detail'|'pause'|'resume'|'close'; web_download_agent için aranacak/indirilecek site URL'si, uygulama veya dosya adı (ör. 'F-Droid APK', 'https://f-droid.org'); schedule_message için '<uygulama>:<virgülle_alıcılar>:<HH:MM>' (ör. 'TikTok:Ahmet,Ayşe:23:00'); air_gesture_control için 'on'|'off'|'on_video'|'on_all'; open_and_play_content için '<uygulama>:<arama_sorgusu>' (ör. 'spotify:Duman', 'youtube:bilim videosu', 'tiktok:eğlenceli videolar', 'default:akustik müzik'); diğerlerinde boş string."
             ),
             "minutes" to Schema.integer(
                 description = "set_reminder için kullanıcının istediği TAM dakika sayısı (ör. '3 dakika' -> 3, 'yarım saat' -> 30, '1 saat' -> 60). Kullanıcı SADECE saniye belirttiyse null bırak.",
@@ -500,6 +501,7 @@ class JarvisRepository {
             - Otonom Web Gezintisi & Dosya/APK İndirme ("F-Droid sitesine gir APK indir", "şu PDF'i bulup telefona indir", "X uygulamasının APK'sını indir"): intent="web_download_agent", target="<hedef site URL'si veya uygulama/dosya adı>"
             - Mesaj Gönderme & Zamanlı Otomatik Mesaj ("WhatsApp'ta Ali'ye selam at", "5 dakika sonra TikTok'ta Ahmet'e '.' yaz", "Saat 23:00'da mesaj at", "TikTok'tan mesaj gönder"): KESİNLİKLE sohbet metni olarak yanıt verme! Her zaman intent="schedule_message", target="<uygulama>:<alıcı1,alıcı2>:<now | +Xm | HH:MM>", message="<gönderilecek mesaj>" döndür (ör. "WhatsApp:Ali:now", "TikTok:Ahmet:+5m", "WhatsApp::now"). Alıcı adı belirsiz veya yoksa alıcı kısmını boş bırak (uygulama içi kutucuk açılsın).
             - Uzaktan El Hareketiyle Telefon Kontrolü ("el kontrolünü aç", "el kontrolünü kapat", "el hareketiyle kaydırmayı durdur", "sadece TikTok'ta el kontrolünü aç"): intent="air_gesture_control", target="on"|"off"|"on_video"|"on_all"
+            - Medya & İçerik Arama ve Otomatik Başlatma ("Spotify'da Duman aç", "YouTube'da bilim videosu başlat", "TikTok'ta eğlenceli videolar aç", "bana moduma uygun bir şeyler aç"): intent="open_and_play_content", target="<uygulama>:<sorgu>" (ör. "spotify:Duman", "youtube:bilim videosu", "tiktok:eğlenceli videolar", "default:akustik şarkılar")
 
             EKRAN NOKTASI TIKLAMA KURALI:
             - Kullanıcı ekrandaki bir butona/sekmeye tıklamak, basmak veya girmek istiyorsa ve yukarıdaki KAYITLI DOKUNMA ETİKETLERİ listesinde karşılık gelen bir etiket varsa mode="action", intent="tap_coordinate", target="<listeden birebir etiket>" seç!
@@ -510,7 +512,7 @@ class JarvisRepository {
             KULLANICI BAĞLAMI: $contextSection
 
             ÇIKTI MODLARI, HUD ETİKETLERİ VE CANLI GÖRSEL SAHNELER:
-            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings, capture_screen_note, open_news_briefing, news_control, web_download_agent, schedule_message veya air_gesture_control niyeti varsa mode="action", reply alanına tek satır onay yaz.
+            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings, capture_screen_note, open_news_briefing, news_control, web_download_agent, schedule_message, air_gesture_control veya open_and_play_content niyeti varsa mode="action", reply alanına tek satır onay yaz.
             - MOD 2 (mode="answer"): Bilgi sorusu, özet, metin üretimi veya sohbetse mode="answer", intent="none" seç.
             - mood alanına yanıtın duygusunu (neutral, serious, analytical, energetic, alert) yaz.
             - topic_title alanına konuyu özetleyen 2-3 kelimelik kısa büyük harfli HUD başlığı yaz (ör. "STRATEJİ ANALİZİ", "GÜNLÜK PLAN", "SİSTEM DURUMU").

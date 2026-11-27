@@ -472,5 +472,6 @@ private fun ActionIntent.icon(): ImageVector = when (this) {
     ActionIntent.WEB_DOWNLOAD_AGENT -> Icons.Rounded.CloudDownload
     ActionIntent.SCHEDULE_MESSAGE -> Icons.Rounded.ScheduleSend
     ActionIntent.AIR_GESTURE_CONTROL -> Icons.Rounded.PanTool
+    ActionIntent.OPEN_AND_PLAY_CONTENT -> Icons.Rounded.PlayCircle
     ActionIntent.NONE -> Icons.Rounded.Code
 }

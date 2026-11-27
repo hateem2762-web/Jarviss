@@ -140,6 +140,8 @@ object VisualCueResolver {
                     VisualCueItem("globe_network", "GÜNDEM // YAYIN")
                 ActionIntent.AIR_GESTURE_CONTROL ->
                     VisualCueItem("brain_spark", "EL KONTROLÜ // KAMERA")
+                ActionIntent.OPEN_AND_PLAY_CONTENT ->
+                    VisualCueItem("music_wave", "MEDYA // İÇERİK")
                 ActionIntent.NONE -> null
             }
             if (fallback != null) {

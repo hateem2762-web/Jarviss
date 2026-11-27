@@ -28,8 +28,10 @@ import com.example.model.JarvisAction
 import com.example.model.TapCoordinateItem
 import com.example.overlay.JarvisOverlayService
 import java.util.Locale
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 private const val TAG = "JarvisActionExecutor"
@@ -169,6 +171,7 @@ class JarvisActionExecutor(
             )
             ActionIntent.SCHEDULE_MESSAGE -> executeScheduleMessage(action)
             ActionIntent.AIR_GESTURE_CONTROL -> executeAirGestureControl(action.target)
+            ActionIntent.OPEN_AND_PLAY_CONTENT -> executeOpenAndPlayContent(action.target)
             ActionIntent.NONE -> ActionExecutionResult(
                 status = ActionExecutionStatus.EXECUTED,
                 detail = ""
@@ -685,5 +688,142 @@ class JarvisActionExecutor(
             if (base.contains(k) || normalizedQuery.contains(k)) aliases.addAll(v)
         }
         return aliases.distinct().filter { it.isNotEmpty() }
+    }
+
+    suspend fun executeOpenAndPlayContent(targetRaw: String): ActionExecutionResult = withContext(Dispatchers.Main) {
+        val colonIdx = targetRaw.indexOf(':')
+        val (app, query) = if (colonIdx != -1) {
+            targetRaw.substring(0, colonIdx).trim().lowercase(Locale.ROOT) to targetRaw.substring(colonIdx + 1).trim()
+        } else {
+            "default" to targetRaw.trim()
+        }
+
+        val cleanQuery = query.ifBlank { "trendler" }
+        var targetPkg = ""
+        var launched = false
+        var label = ""
+
+        when (app) {
+            "spotify" -> {
+                targetPkg = "com.spotify.music"
+                label = "Spotify"
+                try {
+                    val spotifyUri = Uri.parse("spotify:search:${Uri.encode(cleanQuery)}")
+                    val intent = Intent(Intent.ACTION_VIEW, spotifyUri).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(intent)
+                    launched = true
+                } catch (_: Exception) {
+                    try {
+                        val mediaIntent = Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                            setPackage(targetPkg)
+                            putExtra(android.app.SearchManager.QUERY, cleanQuery)
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(mediaIntent)
+                        launched = true
+                    } catch (_: Exception) {
+                        try {
+                            val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://open.spotify.com/search/${Uri.encode(cleanQuery)}")).apply {
+                                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                            }
+                            context.startActivity(webIntent)
+                            launched = true
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
+            "youtube" -> {
+                targetPkg = "com.google.android.youtube"
+                label = "YouTube"
+                try {
+                    val ytIntent = Intent(Intent.ACTION_SEARCH).apply {
+                        setPackage(targetPkg)
+                        putExtra("query", cleanQuery)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(ytIntent)
+                    launched = true
+                } catch (_: Exception) {
+                    try {
+                        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(cleanQuery)}")).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(viewIntent)
+                        launched = true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "YouTube open failed", e)
+                    }
+                }
+            }
+            "tiktok" -> {
+                label = "TikTok"
+                val pm = context.packageManager
+                val hasMusically = try { pm.getPackageInfo("com.zhiliaoapp.musically", 0); true } catch (_: Exception) { false }
+                val hasTrill = try { pm.getPackageInfo("com.ss.android.ugc.trill", 0); true } catch (_: Exception) { false }
+                targetPkg = when {
+                    hasMusically -> "com.zhiliaoapp.musically"
+                    hasTrill -> "com.ss.android.ugc.trill"
+                    else -> "com.zhiliaoapp.musically"
+                }
+                try {
+                    val ttIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiktok.com/search?q=${Uri.encode(cleanQuery)}")).apply {
+                        setPackage(targetPkg)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(ttIntent)
+                    launched = true
+                } catch (_: Exception) {
+                    try {
+                        val webIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.tiktok.com/search?q=${Uri.encode(cleanQuery)}")).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(webIntent)
+                        launched = true
+                    } catch (e: Exception) {
+                        Log.w(TAG, "TikTok open failed", e)
+                    }
+                }
+            }
+            else -> {
+                label = "Medya Oynatıcı"
+                try {
+                    val mediaIntent = Intent(android.provider.MediaStore.INTENT_ACTION_MEDIA_PLAY_FROM_SEARCH).apply {
+                        putExtra(android.app.SearchManager.QUERY, cleanQuery)
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    context.startActivity(mediaIntent)
+                    launched = true
+                } catch (_: Exception) {
+                    try {
+                        val viewIntent = Intent(Intent.ACTION_VIEW, Uri.parse("https://www.youtube.com/results?search_query=${Uri.encode(cleanQuery)}")).apply {
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        context.startActivity(viewIntent)
+                        launched = true
+                    } catch (_: Exception) {}
+                }
+            }
+        }
+
+        val a11y = JarvisAccessibilityService.getInstance()
+        if (a11y != null && targetPkg.isNotBlank()) {
+            CoroutineScope(Dispatchers.Default).launch {
+                a11y.autoPlayFirstResult(targetPkg)
+            }
+        }
+
+        if (launched) {
+            ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "$label üzerinde \"$cleanQuery\" aranıyor ve oynatılıyor."
+            )
+        } else {
+            ActionExecutionResult(
+                status = ActionExecutionStatus.FAILED,
+                detail = "$label başlatılamadı."
+            )
+        }
     }
 }

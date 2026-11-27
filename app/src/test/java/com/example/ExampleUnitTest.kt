@@ -691,4 +691,36 @@ class ExampleUnitTest {
         assertFalse(JarvisAccessibilityService.isVideoFeedPackage("com.whatsapp"))
         assertFalse(JarvisAccessibilityService.isVideoFeedPackage("com.android.settings"))
     }
+
+    @Test
+    fun open_and_play_content_intent_and_matcher_work_correctly() {
+        val spotifyCmd = LocalQuickCommandMatcher.match("Spotify'da Duman aç")
+        assertEquals(ActionIntent.OPEN_AND_PLAY_CONTENT, spotifyCmd?.intent)
+        assertEquals("spotify:Duman", spotifyCmd?.target)
+
+        val ytCmd = LocalQuickCommandMatcher.match("YouTube'da bilim videosu başlat")
+        assertEquals(ActionIntent.OPEN_AND_PLAY_CONTENT, ytCmd?.intent)
+        assertEquals("youtube:bilim videosu", ytCmd?.target)
+
+        val ttCmd = LocalQuickCommandMatcher.match("TikTok'ta eğlenceli videolar aç")
+        assertEquals(ActionIntent.OPEN_AND_PLAY_CONTENT, ttCmd?.intent)
+        assertEquals("tiktok:eğlenceli videolar", ttCmd?.target)
+
+        val moodMusicCmd = LocalQuickCommandMatcher.match("Bana moduma uygun bir şeyler aç")
+        assertEquals(ActionIntent.OPEN_AND_PLAY_CONTENT, moodMusicCmd?.intent)
+        assertTrue(moodMusicCmd?.target?.startsWith("default:") == true)
+
+        val header = HudTopicResolver.resolveHeader(
+            isListening = false,
+            isProcessing = false,
+            hasError = false,
+            hasProactiveAlert = false,
+            latestActionIntent = ActionIntent.OPEN_AND_PLAY_CONTENT,
+            aiTopicTitle = "",
+        )
+        assertEquals("MEDYA // OYNATICI", header)
+
+        val mood = HudTopicResolver.moodForAction(ActionIntent.OPEN_AND_PLAY_CONTENT, JarvisMood.NEUTRAL)
+        assertEquals(JarvisMood.ENERGETIC, mood)
+    }
 }
