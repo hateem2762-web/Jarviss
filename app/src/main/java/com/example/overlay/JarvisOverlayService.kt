@@ -128,10 +128,13 @@ import com.example.data.preferences.UserPreferencesRepository
 import com.example.gesture.GlobalAirGestureController
 import com.example.gesture.GlobalAirGestureDirection
 import com.example.gesture.GlobalAirGestureHudState
+import com.example.gesture.HandPosture
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
 import com.example.model.AirGestureHorizontalAction
 import com.example.model.AirGestureScope
+import com.example.model.AirGestureSensitivity
+import com.example.model.AirGestureTwoFingerAction
 import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisMood
@@ -358,24 +361,33 @@ class JarvisOverlayService : Service() {
         globalAirGestureController = GlobalAirGestureController(
             context = applicationContext,
             onGesture = { dir -> handleGlobalAirGesture(dir) },
-            onTrackingChanged = { cameraActive, handTracked, errorStatus ->
+            onTrackingChanged = { cameraActive, handTracked, posture, errorStatus ->
                 val cur = _globalAirGestureHudState.value
+                val postureBadge = when (posture) {
+                    HandPosture.PINCH -> "PINCH // DURAKLAT"
+                    HandPosture.TWO_FINGER_VICTORY -> "BEĞEN // ✌️"
+                    HandPosture.FIST -> "YUMRUK // BEKLEMEDE"
+                    else -> ""
+                }
                 val nextLabel = when {
                     errorStatus != null -> errorStatus
                     !cameraActive && cur.isWaitingForVideoApp -> "VİDEO BEKLENİYOR"
                     !cameraActive -> "EL KONTROLÜ // BEKLEMEDE"
-                    handTracked -> "HAND TRACKED // READY"
-                    else -> "AIR GESTURE // HAZIR"
+                    postureBadge.isNotBlank() -> postureBadge
+                    handTracked -> "EL ALGILANDI // HAZIR"
+                    else -> "EL KONTROLÜ // HAZIR"
                 }
                 val updated = cur.copy(
                     isCameraActive = cameraActive,
                     isHandTracked = handTracked,
+                    activePostureBadge = postureBadge,
                     statusLabel = nextLabel,
                 )
                 _globalAirGestureHudState.value = updated
                 overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
             },
         )
+        globalAirGestureController?.updateSensitivity(prefsSnapshot.globalAirGestureSensitivity)
 
         serviceScope.launch {
             combine(
@@ -2443,6 +2455,23 @@ class JarvisOverlayService : Service() {
                 }
                 GlobalAirGestureDirection.SWIPE_RIGHT -> {
                     "→ SWIPE // SAĞ" to service.dispatchSwipe(SwipeDirection.RIGHT)
+                }
+                GlobalAirGestureDirection.PINCH -> {
+                    "⏸ PINCH // OYNAT/DURAKLAT" to service.dispatchDoubleTapAtPercent(0.5f, 0.5f)
+                }
+                GlobalAirGestureDirection.TWO_FINGER_VICTORY -> {
+                    val twoFingerAction = prefsSnapshot.globalAirGestureTwoFingerAction
+                    when (twoFingerAction) {
+                        AirGestureTwoFingerAction.DOUBLE_TAP_LIKE -> {
+                            "❤️ BEĞEN // ÇİFT TIK" to service.dispatchDoubleTabAtPercentSafe()
+                        }
+                        AirGestureTwoFingerAction.PLAY_PAUSE -> {
+                            "⏯ OYNAT // DURAKLAT" to service.dispatchDoubleTapAtPercent(0.5f, 0.5f)
+                        }
+                        AirGestureTwoFingerAction.BACK -> {
+                            "↩ GERİ // GİT" to service.dispatchBackAction()
+                        }
+                    }
                 }
             }
 

@@ -240,6 +240,51 @@ enum class AirGestureHorizontalAction(val wireValue: String, val label: String) 
     }
 }
 
+enum class AirGestureSensitivity(val wireValue: String, val label: String) {
+    EASY("easy", "Kolay (Hafif Hareket)"),
+    BALANCED("balanced", "Dengeli"),
+    PRECISE("precise", "Hassas (Büyük Hareket)");
+
+    companion object {
+        fun fromWire(value: String?): AirGestureSensitivity {
+            val clean = value?.trim()?.lowercase().orEmpty()
+            return entries.firstOrNull { it.wireValue == clean } ?: EASY
+        }
+    }
+}
+
+enum class AirGestureTwoFingerAction(val wireValue: String, val label: String) {
+    DOUBLE_TAP_LIKE("like", "Beğen (Çift Tık)"),
+    PLAY_PAUSE("play_pause", "Oynat / Duraklat"),
+    BACK("back", "Geri Git");
+
+    companion object {
+        fun fromWire(value: String?): AirGestureTwoFingerAction {
+            val clean = value?.trim()?.lowercase().orEmpty()
+            return entries.firstOrNull { it.wireValue == clean } ?: DOUBLE_TAP_LIKE
+        }
+    }
+}
+
+enum class QuickMessageTimingMode {
+    IMMEDIATE,
+    DELAY_MINUTES,
+    CLOCK_TIME,
+}
+
+data class QuickMessageDraft(
+    val id: Long = System.currentTimeMillis(),
+    val appName: String = "WhatsApp",
+    val appPackage: String = "com.whatsapp",
+    val recipientsText: String = "",
+    val messageText: String = "",
+    val timingMode: QuickMessageTimingMode = QuickMessageTimingMode.IMMEDIATE,
+    val delayMinutes: Int = 5,
+    val hour: Int = 23,
+    val minute: Int = 0,
+    val repeatDaily: Boolean = false,
+)
+
 object HudTopicResolver {
     fun resolveHeader(
         isListening: Boolean,

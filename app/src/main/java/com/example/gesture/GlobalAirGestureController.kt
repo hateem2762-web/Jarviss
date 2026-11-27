@@ -18,6 +18,7 @@ import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.LifecycleOwner
+import com.example.model.AirGestureSensitivity
 import com.google.mediapipe.framework.image.BitmapImageBuilder
 import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
@@ -30,6 +31,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.math.abs
+import kotlin.math.hypot
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -52,7 +54,22 @@ enum class GlobalAirGestureDirection {
     SWIPE_DOWN,
     SWIPE_LEFT,
     SWIPE_RIGHT,
+    PINCH,
+    TWO_FINGER_VICTORY,
 }
+
+enum class HandPosture {
+    NONE,
+    OPEN_OR_POINTER,
+    PINCH,
+    TWO_FINGER_VICTORY,
+    FIST,
+}
+
+data class HandLandmarkPoint(
+    val x: Float,
+    val y: Float,
+)
 
 data class GlobalAirGestureHudState(
     val isEnabled: Boolean = false,
@@ -60,25 +77,95 @@ data class GlobalAirGestureHudState(
     val isWaitingForVideoApp: Boolean = false,
     val isHandTracked: Boolean = false,
     val statusLabel: String = "EL KONTROLÜ // KAPALI",
+    val activePostureBadge: String = "",
     val lastActionLabel: String = "",
     val lastActionTimestampMs: Long = 0L,
     val triggerCount: Long = 0L,
 )
 
 /**
- * Pure Kotlin 4-direction hand swipe tracker with cooldown & hand presence hysteresis.
- * Image-space coordinates:
- * - userSpaceX: 0f (user's left) .. 1f (user's right)
- * - y: 0f (top) .. 1f (bottom)
- * Therefore moving hand UP produces negative dy, moving hand DOWN produces positive dy.
+ * Rotation- and palm/back-invariant 21-landmark posture classifier.
+ * Uses Euclidean ratios from the wrist (0) to PIPs and fingertips so the user
+ * does NOT have to awkwardly force a flat open palm straight toward the lens.
+ */
+object HandPostureClassifier {
+
+    fun classify(landmarks: List<HandLandmarkPoint>): Triple<HandPosture, Float, HandLandmarkPoint> {
+        if (landmarks.size < 21) {
+            return Triple(HandPosture.NONE, 0.16f, HandLandmarkPoint(0.5f, 0.5f))
+        }
+        val wrist = landmarks[0]
+        val middleMcp = landmarks[9]
+        val handScale = hypot(middleMcp.x - wrist.x, middleMcp.y - wrist.y)
+            .coerceIn(0.06f, 0.45f)
+
+        val thumbTip = landmarks[4]
+        val indexTip = landmarks[8]
+        val middleTip = landmarks[12]
+
+        fun dist(a: HandLandmarkPoint, b: HandLandmarkPoint): Float = hypot(a.x - b.x, a.y - b.y)
+
+        fun isExtended(tipIdx: Int, pipIdx: Int): Boolean {
+            return dist(wrist, landmarks[tipIdx]) > dist(wrist, landmarks[pipIdx]) * 1.12f
+        }
+
+        fun isFolded(tipIdx: Int, pipIdx: Int): Boolean {
+            return dist(wrist, landmarks[tipIdx]) < dist(wrist, landmarks[pipIdx]) * 1.05f
+        }
+
+        val indexExtended = isExtended(8, 6)
+        val middleExtended = isExtended(12, 10)
+        val ringFolded = isFolded(16, 14)
+        val pinkyFolded = isFolded(20, 18)
+
+        val indexFolded = isFolded(8, 6)
+        val middleFolded = isFolded(12, 10)
+
+        val thumbIndexDist = dist(thumbTip, indexTip)
+        val thumbMiddleDist = dist(thumbTip, middleTip)
+
+        val isFist = indexFolded && middleFolded && ringFolded && pinkyFolded
+        val isPinch = !isFist &&
+            thumbIndexDist < handScale * 0.36f &&
+            thumbMiddleDist > handScale * 0.42f
+        val isTwoFinger = !isPinch &&
+            indexExtended &&
+            middleExtended &&
+            ringFolded &&
+            pinkyFolded &&
+            thumbIndexDist > handScale * 0.36f
+
+        val posture = when {
+            isFist -> HandPosture.FIST
+            isPinch -> HandPosture.PINCH
+            isTwoFinger -> HandPosture.TWO_FINGER_VICTORY
+            else -> HandPosture.OPEN_OR_POINTER
+        }
+
+        // Track weighted blend of index fingertip and middle MCP for effortless wrist/finger flicks
+        val anchor = HandLandmarkPoint(
+            x = (1f - (indexTip.x * 0.45f + middleMcp.x * 0.55f)).coerceIn(0f, 1f),
+            y = (indexTip.y * 0.45f + middleMcp.y * 0.55f).coerceIn(0f, 1f),
+        )
+
+        return Triple(posture, handScale, anchor)
+    }
+}
+
+/**
+ * Pure Kotlin 6-gesture tracker (4-direction scale-normalized micro-flicks + Pinch + Two-Finger Victory)
+ * with Fist Pause/Reset, opposite-direction return-stroke suppression, and hand presence hysteresis.
  */
 class GlobalAirGestureTracker(
-    private val cooldownMs: Long = 1_100L,
-    private val minDisplacementY: Float = 0.16f,
-    private val minDisplacementX: Float = 0.20f,
-    private val maxWindowMs: Long = 550L,
-    private val maxCrossAxisRatio: Float = 0.78f,
-    private val handHoldMs: Long = 700L,
+    private var sensitivity: AirGestureSensitivity = AirGestureSensitivity.EASY,
+    private val sameDirectionCooldownMs: Long = 680L,
+    private val oppositeDirectionGuardMs: Long = 1_280L,
+    private val postureCooldownMs: Long = 1_100L,
+    private val pinchHoldMs: Long = 110L,
+    private val twoFingerHoldMs: Long = 220L,
+    private val maxWindowMs: Long = 480L,
+    private val maxCrossAxisRatio: Float = 0.85f,
+    private val handHoldMs: Long = 750L,
 ) {
     private data class Sample(
         val timestampMs: Long,
@@ -89,105 +176,265 @@ class GlobalAirGestureTracker(
     data class FrameOutput(
         val gesture: GlobalAirGestureDirection?,
         val isHandTracked: Boolean,
+        val posture: HandPosture = HandPosture.NONE,
     )
 
     private val samples = ArrayDeque<Sample>()
-    private var lastTriggerMs: Long = -cooldownMs
+    private var lastSwipeTriggerMs: Long = -oppositeDirectionGuardMs
+    private var lastSwipeDirection: GlobalAirGestureDirection? = null
+    private var lastPostureTriggerMs: Long = -postureCooldownMs
     private var lastHandSeenMs: Long = -handHoldMs
     private var handTracked: Boolean = false
+
+    private var smoothedX: Float? = null
+    private var smoothedY: Float? = null
+
+    private var pinchStartMs: Long = -1L
+    private var twoFingerStartMs: Long = -1L
+
+    fun setSensitivity(newSensitivity: AirGestureSensitivity) {
+        sensitivity = newSensitivity
+    }
+
+    fun onLandmarks(
+        landmarks: List<HandLandmarkPoint>?,
+        timestampMs: Long,
+    ): FrameOutput {
+        if (landmarks == null || landmarks.size < 21) {
+            return onFrame(
+                hasHand = false,
+                userSpaceX = 0f,
+                y = 0f,
+                timestampMs = timestampMs,
+                posture = HandPosture.NONE,
+                handScale = 0.16f,
+            )
+        }
+        val (posture, handScale, anchor) = HandPostureClassifier.classify(landmarks)
+        return onFrame(
+            hasHand = true,
+            userSpaceX = anchor.x,
+            y = anchor.y,
+            timestampMs = timestampMs,
+            posture = posture,
+            handScale = handScale,
+        )
+    }
 
     fun onFrame(
         hasHand: Boolean,
         userSpaceX: Float,
         y: Float,
         timestampMs: Long,
+        posture: HandPosture = HandPosture.OPEN_OR_POINTER,
+        handScale: Float = 0.16f,
     ): FrameOutput {
         if (!hasHand) {
+            pinchStartMs = -1L
+            twoFingerStartMs = -1L
             if (samples.isNotEmpty() && timestampMs - lastHandSeenMs > 280L) {
                 samples.clear()
+                smoothedX = null
+                smoothedY = null
             }
             if (handTracked && timestampMs - lastHandSeenMs >= handHoldMs) {
                 handTracked = false
             }
-            return FrameOutput(gesture = null, isHandTracked = handTracked)
+            return FrameOutput(gesture = null, isHandTracked = handTracked, posture = HandPosture.NONE)
         }
 
         lastHandSeenMs = timestampMs
         handTracked = true
 
+        // 1. Fist pauses swiping so user can safely lower or reposition their hand
+        if (posture == HandPosture.FIST) {
+            samples.clear()
+            smoothedX = null
+            smoothedY = null
+            pinchStartMs = -1L
+            twoFingerStartMs = -1L
+            return FrameOutput(gesture = null, isHandTracked = true, posture = HandPosture.FIST)
+        }
+
+        // 2. Pinch posture detection (Play / Pause)
+        if (posture == HandPosture.PINCH) {
+            twoFingerStartMs = -1L
+            samples.clear()
+            if (pinchStartMs < 0L) {
+                pinchStartMs = timestampMs
+            } else if (
+                timestampMs - pinchStartMs >= pinchHoldMs &&
+                timestampMs - lastPostureTriggerMs >= postureCooldownMs
+            ) {
+                lastPostureTriggerMs = timestampMs
+                lastSwipeTriggerMs = timestampMs
+                pinchStartMs = timestampMs + postureCooldownMs
+                return FrameOutput(
+                    gesture = GlobalAirGestureDirection.PINCH,
+                    isHandTracked = true,
+                    posture = HandPosture.PINCH,
+                )
+            }
+            return FrameOutput(gesture = null, isHandTracked = true, posture = HandPosture.PINCH)
+        } else {
+            pinchStartMs = -1L
+        }
+
+        // 3. Two-finger Victory posture detection (Like / Double-Tap or configurable)
+        if (posture == HandPosture.TWO_FINGER_VICTORY) {
+            if (twoFingerStartMs < 0L) {
+                twoFingerStartMs = timestampMs
+            } else if (
+                timestampMs - twoFingerStartMs >= twoFingerHoldMs &&
+                timestampMs - lastPostureTriggerMs >= postureCooldownMs
+            ) {
+                lastPostureTriggerMs = timestampMs
+                lastSwipeTriggerMs = timestampMs
+                twoFingerStartMs = timestampMs + postureCooldownMs
+                samples.clear()
+                return FrameOutput(
+                    gesture = GlobalAirGestureDirection.TWO_FINGER_VICTORY,
+                    isHandTracked = true,
+                    posture = HandPosture.TWO_FINGER_VICTORY,
+                )
+            }
+        } else {
+            twoFingerStartMs = -1L
+        }
+
+        // 4. EMA smoothing + scale-normalized micro-flick swipe tracking
+        val sx = smoothedX?.let { it * 0.35f + userSpaceX * 0.65f } ?: userSpaceX
+        val sy = smoothedY?.let { it * 0.35f + y * 0.65f } ?: y
+        smoothedX = sx
+        smoothedY = sy
+
         val last = samples.lastOrNull()
         if (last != null && timestampMs - last.timestampMs > 280L) {
             samples.clear()
         }
-        samples.addLast(Sample(timestampMs, userSpaceX, y))
+        samples.addLast(Sample(timestampMs, sx, sy))
         while (samples.isNotEmpty() && timestampMs - samples.first().timestampMs > maxWindowMs) {
             samples.removeFirst()
         }
 
-        if (samples.size < 3 || timestampMs - lastTriggerMs < cooldownMs) {
-            return FrameOutput(gesture = null, isHandTracked = true)
+        if (samples.size < 2 || timestampMs - lastSwipeTriggerMs < sameDirectionCooldownMs) {
+            return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
         }
 
+        val (minDy, minDx) = thresholdsFor(handScale)
         val oldest = samples.first()
-        val dx = userSpaceX - oldest.x
-        val dy = y - oldest.y
+        val dx = sx - oldest.x
+        val dy = sy - oldest.y
         val absDx = abs(dx)
         val absDy = abs(dy)
 
-        val gesture = when {
-            absDy >= minDisplacementY && absDy >= absDx && absDx <= absDy * maxCrossAxisRatio -> {
+        val candidate = when {
+            absDy >= minDy && absDy >= absDx && absDx <= absDy * maxCrossAxisRatio -> {
                 if (dy < 0f) GlobalAirGestureDirection.SWIPE_UP else GlobalAirGestureDirection.SWIPE_DOWN
             }
-            absDx >= minDisplacementX && absDx > absDy && absDy <= absDx * maxCrossAxisRatio -> {
+            absDx >= minDx && absDx > absDy && absDy <= absDx * maxCrossAxisRatio -> {
                 if (dx > 0f) GlobalAirGestureDirection.SWIPE_RIGHT else GlobalAirGestureDirection.SWIPE_LEFT
             }
             else -> null
+        } ?: return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
+
+        // Return-stroke suppression: avoid accidental reverse scroll when relaxing hand back down
+        val isOpposite = lastSwipeDirection != null && areOpposite(lastSwipeDirection!!, candidate)
+        if (isOpposite && timestampMs - lastSwipeTriggerMs < oppositeDirectionGuardMs) {
+            val primaryDisp = if (candidate == GlobalAirGestureDirection.SWIPE_UP || candidate == GlobalAirGestureDirection.SWIPE_DOWN) absDy else absDx
+            val primaryThresh = if (candidate == GlobalAirGestureDirection.SWIPE_UP || candidate == GlobalAirGestureDirection.SWIPE_DOWN) minDy else minDx
+            if (primaryDisp < primaryThresh * 1.9f) {
+                return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
+            }
         }
 
-        if (gesture != null) {
-            lastTriggerMs = timestampMs
-            samples.clear()
+        lastSwipeTriggerMs = timestampMs
+        lastSwipeDirection = candidate
+        samples.clear()
+        return FrameOutput(gesture = candidate, isHandTracked = true, posture = posture)
+    }
+
+    private fun thresholdsFor(handScale: Float): Pair<Float, Float> {
+        val scale = handScale.coerceIn(0.06f, 0.42f)
+        return when (sensitivity) {
+            AirGestureSensitivity.EASY -> {
+                val dy = (scale * 0.54f).coerceIn(0.065f, 0.14f)
+                val dx = (scale * 0.68f).coerceIn(0.085f, 0.175f)
+                dy to dx
+            }
+            AirGestureSensitivity.BALANCED -> {
+                val dy = (scale * 0.78f).coerceIn(0.09f, 0.175f)
+                val dx = (scale * 0.94f).coerceIn(0.11f, 0.205f)
+                dy to dx
+            }
+            AirGestureSensitivity.PRECISE -> {
+                val dy = (scale * 1.05f).coerceIn(0.12f, 0.22f)
+                val dx = (scale * 1.22f).coerceIn(0.145f, 0.25f)
+                dy to dx
+            }
         }
-        return FrameOutput(gesture = gesture, isHandTracked = true)
+    }
+
+    private fun areOpposite(a: GlobalAirGestureDirection, b: GlobalAirGestureDirection): Boolean {
+        return (a == GlobalAirGestureDirection.SWIPE_UP && b == GlobalAirGestureDirection.SWIPE_DOWN) ||
+            (a == GlobalAirGestureDirection.SWIPE_DOWN && b == GlobalAirGestureDirection.SWIPE_UP) ||
+            (a == GlobalAirGestureDirection.SWIPE_LEFT && b == GlobalAirGestureDirection.SWIPE_RIGHT) ||
+            (a == GlobalAirGestureDirection.SWIPE_RIGHT && b == GlobalAirGestureDirection.SWIPE_LEFT)
     }
 
     fun checkPresenceExpired(timestampMs: Long): Boolean {
         if (handTracked && timestampMs - lastHandSeenMs >= handHoldMs) {
             handTracked = false
             samples.clear()
+            smoothedX = null
+            smoothedY = null
+            pinchStartMs = -1L
+            twoFingerStartMs = -1L
             return true
         }
         return false
     }
 
-    fun isHandCurrentlyTracked(): Boolean = handTracked
-
     fun reset() {
         samples.clear()
+        smoothedX = null
+        smoothedY = null
+        pinchStartMs = -1L
+        twoFingerStartMs = -1L
         handTracked = false
         lastHandSeenMs = -handHoldMs
+        lastSwipeDirection = null
     }
 }
 
 class GlobalAirGestureController(
     private val context: Context,
     private val onGesture: (GlobalAirGestureDirection) -> Unit,
-    private val onTrackingChanged: (cameraActive: Boolean, handTracked: Boolean, errorStatus: String?) -> Unit,
+    private val onTrackingChanged: (cameraActive: Boolean, handTracked: Boolean, posture: HandPosture, errorStatus: String?) -> Unit,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val tracker = GlobalAirGestureTracker(cooldownMs = 1_100L)
+    private val tracker = GlobalAirGestureTracker()
 
     @Volatile
     private var isStarted = false
+    @Volatile
+    private var lastFrameAnalyzedMs = 0L
     private var startJob: Job? = null
     private var presenceTickerJob: Job? = null
     private var handLandmarker: HandLandmarker? = null
     private var cameraProvider: ProcessCameraProvider? = null
     private var analysisExecutor: ExecutorService? = null
     private var lastReportedHandTracked = false
+    private var lastReportedPosture = HandPosture.NONE
 
     fun isRunning(): Boolean = isStarted
+
+    fun updateSensitivity(sensitivity: AirGestureSensitivity) {
+        synchronized(tracker) {
+            tracker.setSensitivity(sensitivity)
+        }
+    }
 
     fun start(lifecycleOwner: LifecycleOwner) {
         if (isStarted) return
@@ -195,16 +442,18 @@ class GlobalAirGestureController(
             ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            onTrackingChanged(false, false, "Kamera izni gerekli")
+            onTrackingChanged(false, false, HandPosture.NONE, "Kamera izni gerekli")
             return
         }
 
         isStarted = true
-        tracker.reset()
+        synchronized(tracker) { tracker.reset() }
         lastReportedHandTracked = false
+        lastReportedPosture = HandPosture.NONE
+        lastFrameAnalyzedMs = 0L
         startJob?.cancel()
         presenceTickerJob?.cancel()
-        onTrackingChanged(false, false, "EL SENSÖRÜ // HAZIRLANIYOR")
+        onTrackingChanged(false, false, HandPosture.NONE, "EL SENSÖRÜ // HAZIRLANIYOR")
 
         startJob = scope.launch {
             try {
@@ -212,7 +461,7 @@ class GlobalAirGestureController(
                 if (!isStarted) return@launch
                 if (modelBuffer == null) {
                     isStarted = false
-                    onTrackingChanged(false, false, "El modeli indirilemedi")
+                    onTrackingChanged(false, false, HandPosture.NONE, "El modeli indirilemedi")
                     return@launch
                 }
 
@@ -231,18 +480,18 @@ class GlobalAirGestureController(
             } catch (e: SecurityException) {
                 Log.w(TAG, "Camera access blocked in service context", e)
                 stop(silent = true)
-                onTrackingChanged(false, false, "Kamera erişimi kısıtlı")
+                onTrackingChanged(false, false, HandPosture.NONE, "Kamera erişimi kısıtlı")
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start GlobalAirGestureController", e)
                 stop(silent = true)
-                onTrackingChanged(false, false, "Kamera başlatılamadı")
+                onTrackingChanged(false, false, HandPosture.NONE, "Kamera başlatılamadı")
             }
         }
     }
 
     fun stop(silent: Boolean = false) {
         if (!isStarted && cameraProvider == null && handLandmarker == null) {
-            if (!silent) onTrackingChanged(false, false, null)
+            if (!silent) onTrackingChanged(false, false, HandPosture.NONE, null)
             return
         }
         isStarted = false
@@ -250,8 +499,9 @@ class GlobalAirGestureController(
         startJob = null
         presenceTickerJob?.cancel()
         presenceTickerJob = null
-        tracker.reset()
+        synchronized(tracker) { tracker.reset() }
         lastReportedHandTracked = false
+        lastReportedPosture = HandPosture.NONE
 
         val provider = cameraProvider
         cameraProvider = null
@@ -279,7 +529,7 @@ class GlobalAirGestureController(
         }
 
         if (!silent) {
-            onTrackingChanged(false, false, null)
+            onTrackingChanged(false, false, HandPosture.NONE, null)
         }
     }
 
@@ -287,13 +537,14 @@ class GlobalAirGestureController(
         presenceTickerJob?.cancel()
         presenceTickerJob = scope.launch {
             while (isActive && isStarted) {
-                delay(260L)
+                delay(240L)
                 val expired = synchronized(tracker) {
                     tracker.checkPresenceExpired(SystemClock.uptimeMillis())
                 }
-                if (expired && lastReportedHandTracked) {
+                if (expired && (lastReportedHandTracked || lastReportedPosture != HandPosture.NONE)) {
                     lastReportedHandTracked = false
-                    onTrackingChanged(true, false, null)
+                    lastReportedPosture = HandPosture.NONE
+                    onTrackingChanged(true, false, HandPosture.NONE, null)
                 }
             }
         }
@@ -304,13 +555,14 @@ class GlobalAirGestureController(
             .setModelAssetBuffer(modelBuffer)
             .build()
 
+        // Relaxed confidence thresholds so angled hands, finger-only gestures, or back-of-hand track smoothly
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.LIVE_STREAM)
             .setNumHands(1)
-            .setMinHandDetectionConfidence(0.55f)
-            .setMinHandPresenceConfidence(0.55f)
-            .setMinTrackingConfidence(0.50f)
+            .setMinHandDetectionConfidence(0.36f)
+            .setMinHandPresenceConfidence(0.36f)
+            .setMinTrackingConfidence(0.32f)
             .setResultListener { result, _ ->
                 handleLandmarksResult(result)
             }
@@ -359,11 +611,11 @@ class GlobalAirGestureController(
 
                 provider.unbindAll()
                 provider.bindToLifecycle(lifecycleOwner, selector, imageAnalysis)
-                onTrackingChanged(true, false, null)
+                onTrackingChanged(true, false, HandPosture.NONE, null)
             } catch (e: Exception) {
                 Log.e(TAG, "CameraX bindToLifecycle failed", e)
                 stop(silent = true)
-                onTrackingChanged(false, false, "Ön kamera kullanılamıyor")
+                onTrackingChanged(false, false, HandPosture.NONE, "Ön kamera kullanılamıyor")
             }
         }, ContextCompat.getMainExecutor(context))
     }
@@ -379,6 +631,15 @@ class GlobalAirGestureController(
             return
         }
 
+        // Adaptive FPS throttling: ~7 FPS idle (battery/thermal friendly), ~24 FPS while hand tracked
+        val nowMs = SystemClock.uptimeMillis()
+        val minIntervalMs = if (lastReportedHandTracked) 42L else 135L
+        if (nowMs - lastFrameAnalyzedMs < minIntervalMs) {
+            imageProxy.close()
+            return
+        }
+        lastFrameAnalyzedMs = nowMs
+
         try {
             val rawBitmap = imageProxy.toBitmap()
             val uprightBitmap = rotateBitmapIfNeeded(rawBitmap, imageProxy.imageInfo.rotationDegrees)
@@ -386,8 +647,7 @@ class GlobalAirGestureController(
                 rawBitmap.recycle()
             }
             val mpImage = BitmapImageBuilder(uprightBitmap).build()
-            val frameTimeMs = SystemClock.uptimeMillis()
-            marker.detectAsync(mpImage, frameTimeMs)
+            marker.detectAsync(mpImage, nowMs)
         } catch (e: Exception) {
             Log.w(TAG, "Global gesture frame analysis skipped: ${e.message}")
         } finally {
@@ -397,25 +657,20 @@ class GlobalAirGestureController(
 
     private fun handleLandmarksResult(result: HandLandmarkerResult?) {
         if (!isStarted) return
-        val landmarks = result?.landmarks()?.firstOrNull()
+        val rawLandmarks = result?.landmarks()?.firstOrNull()
+        val points = rawLandmarks?.map { lm -> HandLandmarkPoint(lm.x(), lm.y()) }
         val nowMs = SystemClock.uptimeMillis()
 
         val output = synchronized(tracker) {
-            if (landmarks == null || landmarks.size <= 9) {
-                tracker.onFrame(hasHand = false, userSpaceX = 0f, y = 0f, timestampMs = nowMs)
-            } else {
-                val palmRawX = (landmarks[0].x() + landmarks[9].x()) * 0.5f
-                val palmY = (landmarks[0].y() + landmarks[9].y()) * 0.5f
-                val userSpaceX = (1f - palmRawX).coerceIn(0f, 1f)
-                tracker.onFrame(hasHand = true, userSpaceX = userSpaceX, y = palmY, timestampMs = nowMs)
-            }
+            tracker.onLandmarks(points, nowMs)
         }
 
-        if (output.isHandTracked != lastReportedHandTracked) {
+        if (output.isHandTracked != lastReportedHandTracked || output.posture != lastReportedPosture) {
             lastReportedHandTracked = output.isHandTracked
+            lastReportedPosture = output.posture
             mainHandler.post {
                 if (isStarted) {
-                    onTrackingChanged(true, output.isHandTracked, null)
+                    onTrackingChanged(true, output.isHandTracked, output.posture, null)
                 }
             }
         }

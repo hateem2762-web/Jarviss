@@ -623,7 +623,7 @@ class ExampleUnitTest {
 
     @Test
     fun global_air_gesture_tracker_detects_4_directions_and_enforces_cooldown_and_presence() {
-        val tracker = GlobalAirGestureTracker(cooldownMs = 1_100L)
+        val tracker = GlobalAirGestureTracker()
 
         // Hand enters frame -> tracked
         val f1 = tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.75f, timestampMs = 1_000L)

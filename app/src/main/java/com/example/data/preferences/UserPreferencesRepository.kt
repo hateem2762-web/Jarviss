@@ -10,6 +10,8 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.example.model.AirGestureHorizontalAction
 import com.example.model.AirGestureScope
+import com.example.model.AirGestureSensitivity
+import com.example.model.AirGestureTwoFingerAction
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -36,6 +38,8 @@ data class JarvisPreferences(
     val globalAirGestureEnabled: Boolean = false,
     val globalAirGestureScope: AirGestureScope = AirGestureScope.ALL_APPS,
     val globalAirGestureHorizontalAction: AirGestureHorizontalAction = AirGestureHorizontalAction.SWIPE,
+    val globalAirGestureSensitivity: AirGestureSensitivity = AirGestureSensitivity.EASY,
+    val globalAirGestureTwoFingerAction: AirGestureTwoFingerAction = AirGestureTwoFingerAction.DOUBLE_TAP_LIKE,
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -59,6 +63,8 @@ class UserPreferencesRepository(private val context: Context) {
         val GLOBAL_AIR_GESTURE_ENABLED = booleanPreferencesKey("global_air_gesture_enabled")
         val GLOBAL_AIR_GESTURE_SCOPE = stringPreferencesKey("global_air_gesture_scope")
         val GLOBAL_AIR_GESTURE_HORIZONTAL = stringPreferencesKey("global_air_gesture_horizontal")
+        val GLOBAL_AIR_GESTURE_SENSITIVITY = stringPreferencesKey("global_air_gesture_sensitivity")
+        val GLOBAL_AIR_GESTURE_TWO_FINGER = stringPreferencesKey("global_air_gesture_two_finger")
     }
 
     val preferences: Flow<JarvisPreferences> = context.jarvisDataStore.data.map { prefs ->
@@ -82,6 +88,12 @@ class UserPreferencesRepository(private val context: Context) {
             globalAirGestureScope = AirGestureScope.fromWire(prefs[Keys.GLOBAL_AIR_GESTURE_SCOPE]),
             globalAirGestureHorizontalAction = AirGestureHorizontalAction.fromWire(
                 prefs[Keys.GLOBAL_AIR_GESTURE_HORIZONTAL]
+            ),
+            globalAirGestureSensitivity = AirGestureSensitivity.fromWire(
+                prefs[Keys.GLOBAL_AIR_GESTURE_SENSITIVITY]
+            ),
+            globalAirGestureTwoFingerAction = AirGestureTwoFingerAction.fromWire(
+                prefs[Keys.GLOBAL_AIR_GESTURE_TWO_FINGER]
             ),
         )
     }
@@ -194,6 +206,18 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setGlobalAirGestureHorizontalAction(action: AirGestureHorizontalAction) {
         context.jarvisDataStore.edit { prefs ->
             prefs[Keys.GLOBAL_AIR_GESTURE_HORIZONTAL] = action.wireValue
+        }
+    }
+
+    suspend fun setGlobalAirGestureSensitivity(sensitivity: AirGestureSensitivity) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.GLOBAL_AIR_GESTURE_SENSITIVITY] = sensitivity.wireValue
+        }
+    }
+
+    suspend fun setGlobalAirGestureTwoFingerAction(action: AirGestureTwoFingerAction) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.GLOBAL_AIR_GESTURE_TWO_FINGER] = action.wireValue
         }
     }
 }

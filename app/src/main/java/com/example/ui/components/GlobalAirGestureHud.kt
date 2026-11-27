@@ -84,8 +84,9 @@ fun GlobalAirGestureHudPill(
 
     val displayText = when {
         hasActionFlash -> state.lastActionLabel
-        state.isHandTracked -> "HAND TRACKED // READY"
-        else -> state.statusLabel.ifBlank { "AIR GESTURE // HAZIR" }
+        state.activePostureBadge.isNotBlank() -> state.activePostureBadge
+        state.isHandTracked -> "EL ALGILANDI // HAZIR"
+        else -> state.statusLabel.ifBlank { "EL KONTROLÜ // HAZIR" }
     }
 
     Surface(

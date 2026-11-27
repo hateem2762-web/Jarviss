@@ -292,6 +292,20 @@ class JarvisAccessibilityService : AccessibilityService() {
         }
     }
 
+    suspend fun dispatchDoubleTapAtPercent(
+        xPercent: Float = 0.5f,
+        yPercent: Float = 0.48f,
+    ): Boolean {
+        val first = dispatchTapAtPercent(xPercent, yPercent)
+        if (!first) return false
+        delay(80L)
+        return dispatchTapAtPercent(xPercent, yPercent)
+    }
+
+    suspend fun dispatchDoubleTabAtPercentSafe(): Boolean {
+        return dispatchDoubleTapAtPercent(0.5f, 0.52f)
+    }
+
     /**
      * Dispatches a realistic touch fling/scroll via AccessibilityService.dispatchGesture.
      * NEXT_UP swipes finger bottom -> top (advances TikTok / Reels / Shorts to next video).
@@ -421,7 +435,16 @@ class JarvisAccessibilityService : AccessibilityService() {
 
         delay(1_100L)
 
-        // Open Inbox / Chats tab if present (e.g. TikTok Inbox, Instagram DM)
+        // If app opened inside an existing chat (bottom message EditText visible), back out to Chats/Inbox
+        repeat(2) {
+            val currentRoot = rootInActiveWindow
+            if (currentRoot != null && findBottomMessageInput(currentRoot) != null) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(650L)
+            }
+        }
+
+        // Open Inbox / Chats tab if present (e.g. TikTok Inbox, Instagram DM, WhatsApp Chats)
         rootInActiveWindow?.let { root ->
             if (resolvedPackage.contains("musically") || resolvedPackage.contains("trill")) {
                 clickNodeByLabels(root, listOf("gelen kutusu", "inbox", "mesajlar", "messages"))
@@ -429,6 +452,9 @@ class JarvisAccessibilityService : AccessibilityService() {
             } else if (resolvedPackage.contains("instagram")) {
                 clickNodeByLabels(root, listOf("mesajlar", "messages", "direct"))
                 delay(1_100L)
+            } else if (resolvedPackage.contains("whatsapp")) {
+                clickNodeByLabels(root, listOf("sohbetler", "chats"))
+                delay(450L)
             }
         }
 
@@ -436,7 +462,11 @@ class JarvisAccessibilityService : AccessibilityService() {
         val failed = mutableListOf<String>()
 
         for ((idx, recipient) in recipients.withIndex()) {
-            val ok = sendSingleRecipientViaUi(recipient = recipient, messageText = messageText)
+            val ok = sendSingleRecipientViaUi(
+                targetPackage = resolvedPackage,
+                recipient = recipient,
+                messageText = messageText,
+            )
             if (ok) {
                 sentCount++
             } else {
@@ -494,52 +524,76 @@ class JarvisAccessibilityService : AccessibilityService() {
     }
 
     private suspend fun sendSingleRecipientViaUi(
+        targetPackage: String,
         recipient: String,
         messageText: String,
     ): Boolean {
         val normRecipient = normalizeUiText(recipient)
         if (normRecipient.isBlank()) return false
 
-        // Step 1: Check if recipient chat row is already visible on Inbox/Chats screen
+        val (_, screenH) = getRealScreenSize(this)
         var root = rootInActiveWindow ?: return false
-        var openedChat = clickChatRowContaining(root, normRecipient)
 
-        // Step 2: Otherwise tap Search / New Message and type recipient name
+        // Step 1: Check if recipient chat row is already visible on Inbox/Chats screen (excluding headers/search)
+        var openedChat = clickChatRowContaining(root, normRecipient, minTopPx = (screenH * 0.14f).toInt())
+
+        // Step 2: Otherwise open New Chat / Search and type recipient into a TOP-HALF search EditText only
         if (!openedChat) {
-            val searchEdit = findEditableNodes(root).firstOrNull()
-            if (searchEdit != null) {
-                setNodeText(searchEdit, recipient)
-                delay(1_200L)
+            val topSearchEdit = findTopSearchEditNode(root, screenH)
+            if (topSearchEdit != null) {
+                performReliableClick(topSearchEdit)
+                delay(280L)
+                setNodeText(topSearchEdit, recipient)
+                delay(1_300L)
             } else {
-                clickNodeByLabels(root, listOf("ara", "search", "yeni sohbet", "new chat", "new message"))
-                delay(800L)
+                val navLabels = if (targetPackage.contains("whatsapp")) {
+                    listOf("yeni sohbet", "new chat", "ara", "search")
+                } else {
+                    listOf("ara", "search", "yeni mesaj", "new message", "yeni sohbet", "new chat")
+                }
+                clickNodeByLabels(root, navLabels)
+                delay(850L)
                 root = rootInActiveWindow ?: return false
-                val activeEdit = findEditableNodes(root).firstOrNull()
-                if (activeEdit != null) {
-                    setNodeText(activeEdit, recipient)
-                    delay(1_300L)
+                // On WhatsApp "Yeni sohbet", sometimes you need to tap the top Search icon inside Contacts
+                var activeSearchEdit = findTopSearchEditNode(root, screenH)
+                if (activeSearchEdit == null) {
+                    clickNodeByLabels(root, listOf("ara", "search"))
+                    delay(650L)
+                    root = rootInActiveWindow ?: return false
+                    activeSearchEdit = findTopSearchEditNode(root, screenH)
+                }
+                if (activeSearchEdit != null) {
+                    performReliableClick(activeSearchEdit)
+                    delay(240L)
+                    setNodeText(activeSearchEdit, recipient)
+                    delay(1_350L)
                 }
             }
             root = rootInActiveWindow ?: return false
-            openedChat = clickChatRowContaining(root, normRecipient)
+            val activeSearchTop = findTopSearchEditNode(root, screenH)?.let { node ->
+                Rect().also { node.getBoundsInScreen(it) }.bottom + 12
+            } ?: (screenH * 0.18f).toInt()
+            openedChat = clickChatRowContaining(root, normRecipient, minTopPx = activeSearchTop)
         }
 
         if (!openedChat) return false
-        delay(1_100L)
+        delay(1_150L)
 
         // Step 3: Locate bottom message EditText inside conversation screen
         root = rootInActiveWindow ?: return false
-        val messageInput = findMessageInputNode(root) ?: return false
+        val messageInput = findMessageInputNode(root, screenH) ?: return false
+        performReliableClick(messageInput)
+        delay(220L)
         val typed = setNodeText(messageInput, messageText)
         if (!typed) return false
-        delay(500L)
+        delay(550L)
 
         // Step 4: Locate and tap Send button
         root = rootInActiveWindow ?: return false
         return clickSendButton(root, messageInput)
     }
 
-    private fun collectAllNodes(root: AccessibilityNodeInfo?, maxNodes: Int = 320): List<AccessibilityNodeInfo> {
+    private fun collectAllNodes(root: AccessibilityNodeInfo?, maxNodes: Int = 340): List<AccessibilityNodeInfo> {
         if (root == null) return emptyList()
         val list = ArrayList<AccessibilityNodeInfo>(64)
         val queue = ArrayDeque<AccessibilityNodeInfo>()
@@ -577,12 +631,17 @@ class JarvisAccessibilityService : AccessibilityService() {
     private suspend fun clickChatRowContaining(
         root: AccessibilityNodeInfo,
         normRecipient: String,
+        minTopPx: Int = 0,
     ): Boolean {
         val nodes = collectAllNodes(root)
         val match = nodes.firstOrNull { node ->
             if (!node.isVisibleToUser || node.isEditable) return@firstOrNull false
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            if (rect.top < minTopPx) return@firstOrNull false
             val text = normalizeUiText(node.text?.toString().orEmpty())
             val desc = normalizeUiText(node.contentDescription?.toString().orEmpty())
+            if (text.contains("meta ai") || desc.contains("meta ai")) return@firstOrNull false
             text.contains(normRecipient) || desc.contains(normRecipient)
         } ?: return false
         return performReliableClick(match)
@@ -601,14 +660,40 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
     }
 
-    private fun findMessageInputNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+    private fun findTopSearchEditNode(root: AccessibilityNodeInfo, screenH: Int): AccessibilityNodeInfo? {
+        return findEditableNodes(root).firstOrNull { node ->
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            val hint = normalizeUiText((node.hintText ?: node.contentDescription ?: node.text)?.toString().orEmpty())
+            val looksLikeSearch = hint.contains("ara") || hint.contains("search") || hint.contains("bul")
+            rect.top < (screenH * 0.42f) && (looksLikeSearch || !hint.contains("mesaj") && !hint.contains("message"))
+        }
+    }
+
+    private fun findBottomMessageInput(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val (_, screenH) = getRealScreenSize(this)
+        return findEditableNodes(root).lastOrNull { node ->
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            rect.bottom >= (screenH * 0.50f)
+        }
+    }
+
+    private fun findMessageInputNode(root: AccessibilityNodeInfo, screenH: Int): AccessibilityNodeInfo? {
         val edits = findEditableNodes(root)
         if (edits.isEmpty()) return null
-        val labeled = edits.firstOrNull { node ->
+        val labeled = edits.lastOrNull { node ->
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
             val hint = normalizeUiText((node.hintText ?: node.text ?: node.contentDescription)?.toString().orEmpty())
-            hint.contains("mesaj") || hint.contains("message") || hint.contains("yaz") || hint.contains("send")
+            rect.bottom >= (screenH * 0.42f) &&
+                (hint.contains("mesaj") || hint.contains("message") || hint.contains("yaz") || hint.contains("send"))
         }
-        return labeled ?: edits.lastOrNull()
+        return labeled ?: edits.lastOrNull { node ->
+            val rect = Rect()
+            node.getBoundsInScreen(rect)
+            rect.bottom >= (screenH * 0.45f)
+        } ?: edits.lastOrNull()
     }
 
     private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {

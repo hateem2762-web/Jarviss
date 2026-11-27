@@ -77,19 +77,11 @@ object LocalQuickCommandMatcher {
     }
 
     private fun matchScheduledMessageCommand(rawPrompt: String): JarvisAction? {
-        val parsed = ScheduledMessageParser.parse(rawPrompt) ?: return null
-        val formattedTime = String.format(Locale.ROOT, "%02d:%02d", parsed.hour, parsed.minute)
-        val encodedTarget = listOf(
-            parsed.appName,
-            parsed.appPackage,
-            parsed.recipients.joinToString(","),
-            formattedTime,
-            parsed.repeatDaily.toString(),
-        ).joinToString("|")
+        val draft = ScheduledMessageParser.parseDraft(rawPrompt) ?: return null
         return JarvisAction(
             intent = ActionIntent.SCHEDULE_MESSAGE,
-            target = encodedTarget,
-            message = parsed.messageText,
+            target = ScheduledMessageParser.encodeDraftTarget(draft),
+            message = draft.messageText,
         )
     }
 
