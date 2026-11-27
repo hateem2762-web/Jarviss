@@ -27,6 +27,10 @@ data class JarvisPreferences(
     val importanceThreshold: Int = 7,
     val manualProfilePackageName: String = "",
     val manualProfileName: String = "",
+    val newsAirGestureEnabled: Boolean = false,
+    val maleVoiceEnabled: Boolean = true,
+    val selectedTtsVoiceName: String = "",
+    val webAgentConfirmBeforeDownload: Boolean = true,
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -43,6 +47,10 @@ class UserPreferencesRepository(private val context: Context) {
         val IMPORTANCE_THRESHOLD = intPreferencesKey("importance_threshold")
         val MANUAL_PROFILE_PKG = stringPreferencesKey("manual_profile_pkg")
         val MANUAL_PROFILE_NAME = stringPreferencesKey("manual_profile_name")
+        val NEWS_AIR_GESTURE = booleanPreferencesKey("news_air_gesture_enabled")
+        val MALE_VOICE_ENABLED = booleanPreferencesKey("male_voice_enabled")
+        val SELECTED_TTS_VOICE = stringPreferencesKey("selected_tts_voice_name")
+        val WEB_AGENT_CONFIRM_DOWNLOAD = booleanPreferencesKey("web_agent_confirm_download")
     }
 
     val preferences: Flow<JarvisPreferences> = context.jarvisDataStore.data.map { prefs ->
@@ -58,6 +66,10 @@ class UserPreferencesRepository(private val context: Context) {
             importanceThreshold = (prefs[Keys.IMPORTANCE_THRESHOLD] ?: 7).coerceIn(1, 10),
             manualProfilePackageName = prefs[Keys.MANUAL_PROFILE_PKG] ?: "",
             manualProfileName = prefs[Keys.MANUAL_PROFILE_NAME] ?: "",
+            newsAirGestureEnabled = prefs[Keys.NEWS_AIR_GESTURE] ?: false,
+            maleVoiceEnabled = prefs[Keys.MALE_VOICE_ENABLED] ?: true,
+            selectedTtsVoiceName = prefs[Keys.SELECTED_TTS_VOICE] ?: "",
+            webAgentConfirmBeforeDownload = prefs[Keys.WEB_AGENT_CONFIRM_DOWNLOAD] ?: true,
         )
     }
 
@@ -127,6 +139,30 @@ class UserPreferencesRepository(private val context: Context) {
         context.jarvisDataStore.edit { prefs ->
             prefs[Keys.MANUAL_PROFILE_PKG] = packageName.trim()
             prefs[Keys.MANUAL_PROFILE_NAME] = displayName.trim()
+        }
+    }
+
+    suspend fun setNewsAirGestureEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.NEWS_AIR_GESTURE] = enabled
+        }
+    }
+
+    suspend fun setMaleVoiceEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.MALE_VOICE_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setSelectedTtsVoiceName(voiceName: String) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.SELECTED_TTS_VOICE] = voiceName
+        }
+    }
+
+    suspend fun setWebAgentConfirmBeforeDownload(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.WEB_AGENT_CONFIRM_DOWNLOAD] = enabled
         }
     }
 }

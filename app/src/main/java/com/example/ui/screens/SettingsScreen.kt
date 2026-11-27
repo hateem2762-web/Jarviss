@@ -20,11 +20,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.AccessibilityNew
 import androidx.compose.material.icons.rounded.AddLocationAlt
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
@@ -77,6 +79,7 @@ fun SettingsScreen(
     hasMicPermission: Boolean,
     hasAccessibilityPermission: Boolean,
     hasNotificationListenerPermission: Boolean,
+    hasCameraPermission: Boolean,
     onRequestOverlayPermission: () -> Unit,
     onRequestMicPermission: () -> Unit,
     onOpenAccessibilitySettings: () -> Unit,
@@ -87,9 +90,15 @@ fun SettingsScreen(
     onToggleDarkTheme: (Boolean) -> Unit,
     onToggleAutoExecute: (Boolean) -> Unit,
     onToggleSpeakReplies: (Boolean) -> Unit,
+    onToggleMaleVoice: (Boolean) -> Unit,
+    onSelectTtsVoice: (String) -> Unit,
+    onTestVoice: () -> Unit,
+    onInstallTtsData: () -> Unit,
     onTogglePersistentTrigger: (Boolean) -> Unit,
     onToggleFloatingBubble: (Boolean) -> Unit,
     onToggleWakeWord: (Boolean) -> Unit,
+    onToggleNewsAirGesture: (Boolean) -> Unit,
+    onToggleWebAgentConfirm: (Boolean) -> Unit,
     onToggleProactiveAlerts: (Boolean) -> Unit,
     onChangeImportanceThreshold: (Int) -> Unit,
     onDisableAllOverlays: () -> Unit,
@@ -550,11 +559,161 @@ fun SettingsScreen(
                     )
 
                     SettingToggleRow(
+                        title = "Erkek Sesi (JARVIS)",
+                        subtitle = "Aktif profil: ${uiState.ttsVoiceInfo.activeLabel} • Varsayılan olarak kalın erkek tonu kullanır",
+                        checked = uiState.preferences.maleVoiceEnabled,
+                        onCheckedChange = onToggleMaleVoice,
+                        testTag = "toggle_male_voice",
+                    )
+
+                    if (uiState.ttsVoiceInfo.availableOptions.isNotEmpty()) {
+                        Text(
+                            text = "Yüklü Türkçe Ses Profilleri",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        FlowRow(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            val autoSelected = uiState.preferences.selectedTtsVoiceName.isBlank()
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (autoSelected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (autoSelected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSelectTtsVoice("") }
+                                    .testTag("voice_chip_auto"),
+                            ) {
+                                Text(
+                                    text = if (uiState.preferences.maleVoiceEnabled) {
+                                        "Otomatik (Erkek)"
+                                    } else {
+                                        "Otomatik (Standart)"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (autoSelected) {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                )
+                            }
+
+                            uiState.ttsVoiceInfo.availableOptions.forEachIndexed { index, option ->
+                                val isSelected = uiState.preferences.selectedTtsVoiceName == option.name
+                                Surface(
+                                    shape = RoundedCornerShape(10.dp),
+                                    color = if (isSelected) {
+                                        MaterialTheme.colorScheme.primaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                    },
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (isSelected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.outlineVariant
+                                        }
+                                    ),
+                                    modifier = Modifier
+                                        .minimumInteractiveComponentSize()
+                                        .clip(RoundedCornerShape(10.dp))
+                                        .clickable { onSelectTtsVoice(option.name) }
+                                        .testTag("voice_chip_$index"),
+                                ) {
+                                    Text(
+                                        text = option.label,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        color = if (isSelected) {
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = onTestVoice,
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("test_jarvis_voice_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.VolumeUp,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(text = "Sesi Test Et")
+                        }
+                        OutlinedButton(
+                            onClick = onInstallTtsData,
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("install_tts_voices_button"),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Download,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(text = "Ses Paketi İndir")
+                        }
+                    }
+
+                    SettingToggleRow(
                         title = "Obsidian Koyu HUD",
                         subtitle = "Yüksek kontrastlı gece komuta arayüzü",
                         checked = uiState.preferences.darkTheme,
                         onCheckedChange = onToggleDarkTheme,
                         testTag = "toggle_dark_theme",
+                    )
+
+                    SettingToggleRow(
+                        title = "Haber Modunda El Hareketi (Kamera Kontrolü)",
+                        subtitle = if (uiState.preferences.newsAirGestureEnabled && !hasCameraPermission) {
+                            "Açık • Ön kamera izni gerekiyor"
+                        } else {
+                            "\"Bana haberleri de\" dediğinde ön kameradan el kaydırma ile haber geçer (haber kapanınca kamera durur)"
+                        },
+                        checked = uiState.preferences.newsAirGestureEnabled,
+                        onCheckedChange = onToggleNewsAirGesture,
+                        testTag = "toggle_news_air_gesture",
+                    )
+
+                    SettingToggleRow(
+                        title = "Web Ajanı: APK / Dosya indirmeden önce onay iste",
+                        subtitle = "APK veya bilinmeyen kaynaktan dosya bulunursa indirmeden önce güvenlik onayı ister",
+                        checked = uiState.preferences.webAgentConfirmBeforeDownload,
+                        onCheckedChange = onToggleWebAgentConfirm,
+                        testTag = "toggle_web_agent_confirm",
                     )
                 }
             }

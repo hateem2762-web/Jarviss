@@ -22,6 +22,10 @@ enum class ActionIntent(val wireValue: String, val displayLabel: String) {
     BATTERY_STATUS("battery_status", "Pil Durumu"),
     OPEN_SYSTEM_SETTINGS("open_system_settings", "Sistem Ayarı"),
     CAPTURE_SCREEN_NOTE("capture_screen_note", "Ekranı Not Al"),
+    OPEN_NEWS_BRIEFING("open_news_briefing", "Gündem Bülteni"),
+    NEWS_CONTROL("news_control", "Haber Kontrolü"),
+    WEB_DOWNLOAD_AGENT("web_download_agent", "Web İndirme Ajanı"),
+    SCHEDULE_MESSAGE("schedule_message", "Zamanlı Mesaj"),
     NONE("none", "Yanıt");
 
     companion object {
@@ -160,6 +164,34 @@ data class NoteItem(
     val updatedAtMillis: Long,
 )
 
+data class ScheduledMessageRuleItem(
+    val id: Long,
+    val targetAppPackage: String,
+    val targetAppName: String,
+    val recipients: List<String>,
+    val messageText: String,
+    val triggerHour: Int,
+    val triggerMinute: Int,
+    val repeatDaily: Boolean,
+    val isEnabled: Boolean,
+    val nextTriggerAtMillis: Long,
+    val lastRunAtMillis: Long?,
+    val lastStatus: String,
+    val createdAtMillis: Long,
+) {
+    fun formattedTime(): String = String.format(Locale.ROOT, "%02d:%02d", triggerHour, triggerMinute)
+}
+
+data class ScheduledMessageLogItem(
+    val id: Long,
+    val ruleId: Long,
+    val targetAppName: String,
+    val recipientsSummary: String,
+    val status: String,
+    val detail: String,
+    val executedAtMillis: Long,
+)
+
 enum class JarvisMood(val wireValue: String) {
     NEUTRAL("neutral"),
     SERIOUS("serious"),
@@ -191,15 +223,21 @@ object HudTopicResolver {
         hasProactiveAlert: Boolean,
         latestActionIntent: ActionIntent?,
         aiTopicTitle: String,
+        webAgentHeader: String = "",
     ): String {
         return when {
             hasError -> "SİSTEM UYARISI // KRİTİK"
             isListening -> "SES KANALI // DİNLENİYOR"
+            webAgentHeader.isNotBlank() -> webAgentHeader.trim().uppercase(Locale("tr", "TR"))
             isProcessing -> "NÖRAL ÇEKİRDEK // ANALİZ"
             hasProactiveAlert -> "İLETİŞİM PROTOKOLÜ // TASLAK"
             latestActionIntent == ActionIntent.CAPTURE_SCREEN_NOTE -> "GÖRSEL TARAMA // ARŞİV KAYDI"
             latestActionIntent == ActionIntent.TAP_COORDINATE -> "HEDEF KİLİTLEME // OTOMASYON"
             latestActionIntent == ActionIntent.SET_REMINDER -> "ZAMANLAYICI // HATIRLATMA"
+            latestActionIntent == ActionIntent.SCHEDULE_MESSAGE -> "OTOMASYON // ZAMANLI MESAJ"
+            latestActionIntent == ActionIntent.WEB_DOWNLOAD_AGENT -> "WEB AJANI // İNDİRME"
+            latestActionIntent == ActionIntent.OPEN_NEWS_BRIEFING ||
+                latestActionIntent == ActionIntent.NEWS_CONTROL -> "JARVIS // GÜNDEM"
             latestActionIntent in setOf(
                 ActionIntent.BATTERY_STATUS,
                 ActionIntent.TORCH_CONTROL,
@@ -220,13 +258,17 @@ object HudTopicResolver {
     fun moodForAction(intent: ActionIntent, fallbackMood: JarvisMood): JarvisMood {
         return when (intent) {
             ActionIntent.CAPTURE_SCREEN_NOTE,
-            ActionIntent.BATTERY_STATUS -> JarvisMood.ANALYTICAL
+            ActionIntent.BATTERY_STATUS,
+            ActionIntent.WEB_DOWNLOAD_AGENT -> JarvisMood.ANALYTICAL
             ActionIntent.TAP_COORDINATE,
             ActionIntent.TORCH_CONTROL,
             ActionIntent.SEARCH_YOUTUBE -> JarvisMood.ENERGETIC
             ActionIntent.SET_REMINDER,
+            ActionIntent.SCHEDULE_MESSAGE,
             ActionIntent.OPEN_SYSTEM_SETTINGS,
-            ActionIntent.VOLUME_CONTROL -> JarvisMood.SERIOUS
+            ActionIntent.VOLUME_CONTROL,
+            ActionIntent.OPEN_NEWS_BRIEFING,
+            ActionIntent.NEWS_CONTROL -> JarvisMood.SERIOUS
             else -> fallbackMood
         }
     }

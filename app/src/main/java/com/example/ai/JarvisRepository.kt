@@ -7,6 +7,9 @@ import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.JarvisMessage
 import com.example.model.JarvisMood
+import com.example.news.NewsBriefingItem
+import com.example.news.NewsCategory
+import com.example.news.RawRssArticle
 import com.example.system.ReminderDurationParser
 import com.google.firebase.Firebase
 import com.google.firebase.ai.GenerativeModel
@@ -22,6 +25,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
+import org.json.JSONArray
 import org.json.JSONObject
 
 private const val TAG = "JarvisRepository"
@@ -35,6 +39,7 @@ data class JarvisAiReply(
     val action: JarvisAction?,
     val mood: JarvisMood = JarvisMood.NEUTRAL,
     val topicTitle: String = "",
+    val visualCues: List<String> = emptyList(),
 )
 
 data class WhatsAppEvaluation(
@@ -76,12 +81,16 @@ class JarvisRepository {
                     "battery_status",
                     "open_system_settings",
                     "capture_screen_note",
+                    "open_news_briefing",
+                    "news_control",
+                    "web_download_agent",
+                    "schedule_message",
                     "none"
                 ),
                 description = "Aksiyon niyeti."
             ),
             "target" to Schema.string(
-                description = "open_app için uygulama adı; open_url için URL; search_youtube için sorgu; tap_coordinate için kayıtlı etiket; torch_control için 'on'|'off'|'toggle'; volume_control için '<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>'; open_system_settings için 'wifi'|'bluetooth'|'sound'|'accessibility'|'notifications'|'battery'|'display'|'location'|'settings'; diğerlerinde boş string."
+                description = "open_app için uygulama adı; open_url için URL; search_youtube için sorgu; tap_coordinate için kayıtlı etiket; torch_control için 'on'|'off'|'toggle'; volume_control için '<media|ring|notification|alarm>:<up|down|mute|unmute|vibrate|max|set>:<0-100?>'; open_system_settings için 'wifi'|'bluetooth'|'sound'|'accessibility'|'notifications'|'battery'|'display'|'location'|'settings'; open_news_briefing için genel gündemde boş string '', belirli bir konu/takım/kişi/alan istendiyse sadece temiz arama konusu (ör. 'Beşiktaş', 'ekonomi', 'yapay zeka'); news_control için 'next'|'previous'|'detail'|'pause'|'resume'|'close'; web_download_agent için aranacak/indirilecek site URL'si, uygulama veya dosya adı (ör. 'F-Droid APK', 'https://f-droid.org'); schedule_message için '<uygulama>:<virgülle_alıcılar>:<HH:MM>' (ör. 'TikTok:Ahmet,Ayşe:23:00'); diğerlerinde boş string."
             ),
             "minutes" to Schema.integer(
                 description = "set_reminder için kullanıcının istediği TAM dakika sayısı (ör. '3 dakika' -> 3, 'yarım saat' -> 30, '1 saat' -> 60). Kullanıcı SADECE saniye belirttiyse null bırak.",
@@ -92,7 +101,7 @@ class JarvisRepository {
                 nullable = true
             ),
             "message" to Schema.string(
-                description = "set_reminder için hatırlatma metni; diğer durumlarda boş string."
+                description = "set_reminder için hatırlatma metni; schedule_message için gönderilecek tam mesaj metni (ör. '.'); diğer durumlarda boş string."
             ),
             "mood" to Schema.enumeration(
                 values = listOf("neutral", "serious", "analytical", "energetic", "alert"),
@@ -101,8 +110,12 @@ class JarvisRepository {
             "topic_title" to Schema.string(
                 description = "Konuşulan konuya uygun 2-3 kelimelik kısa büyük harfli HUD başlığı (ör. STRATEJİ ANALİZİ, HİKAYE KURGUSU, SİSTEM DURUMU, İLETİŞİM PROTOKOLÜ)."
             ),
+            "visual_cues" to Schema.array(
+                items = Schema.string(),
+                description = "Yanıt veya anlatım sırasında parçacık bulutunun yanında sırayla canlandırılacak 1-4 sembolik sahne anahtarı. Tercih edilen anahtarlar: eagle_crest, stadium, fist_impact, ball_sport, trophy_cup, download_file, globe_network, shield_alert, message_send, timer_clock, weather_storm, weather_sun, rocket_launch, brain_spark, money_chart, music_wave, code_terminal, flashlight_beam, battery_power, note_scroll, heart_health, flame_energy."
+            ),
         ),
-        optionalProperties = listOf("minutes", "seconds", "mood", "topic_title")
+        optionalProperties = listOf("minutes", "seconds", "mood", "topic_title", "visual_cues")
     )
 
     private val schemaGenerationConfig = generationConfig {
@@ -176,6 +189,47 @@ class JarvisRepository {
         Firebase.ai.generativeModel(
             modelName = PRIMARY_MODEL,
             generationConfig = screenNoteConfig,
+        )
+    }
+
+    private val newsBriefingSchema = Schema.obj(
+        properties = mapOf(
+            "items" to Schema.array(
+                items = Schema.obj(
+                    properties = mapOf(
+                        "source_index" to Schema.integer(
+                            description = "Verilen ham haber listesindeki sıfır tabanlı indeks numarası."
+                        ),
+                        "category" to Schema.enumeration(
+                            values = listOf("GÜNDEM", "TEKNOLOJİ", "SPOR", "DÜNYA"),
+                            description = "Haberin kategorisi."
+                        ),
+                        "headline" to Schema.string(
+                            description = "Tık tuzağı içermeyen, net, çarpıcı ve kısa Türkçe haber başlığı."
+                        ),
+                        "brief_summary" to Schema.string(
+                            description = "JARVIS spiker üslubunda akıcı, 1-2 cümlelik kısa bülten özeti."
+                        ),
+                        "detailed_summary" to Schema.string(
+                            description = "Kullanıcı 'detaylandır' dediğinde okunacak 3-4 cümlelik kapsamlı arka plan özeti."
+                        ),
+                    )
+                ),
+                description = "Tık tuzağı elendikten sonra seçilen en önemli 6 haber."
+            )
+        )
+    )
+
+    private val newsBriefingConfig = generationConfig {
+        responseMimeType = "application/json"
+        responseSchema = newsBriefingSchema
+        temperature = 0.2f
+    }
+
+    private val newsBriefingModel: GenerativeModel by lazy {
+        Firebase.ai.generativeModel(
+            modelName = PRIMARY_MODEL,
+            generationConfig = newsBriefingConfig,
         )
     }
 
@@ -368,6 +422,16 @@ class JarvisRepository {
         val topicTitle = json.optString("topic_title", "").let {
             if (it == "null") "" else it.trim().uppercase(Locale("tr", "TR"))
         }
+        val visualCues = mutableListOf<String>()
+        val cuesArr = json.optJSONArray("visual_cues")
+        if (cuesArr != null) {
+            for (i in 0 until cuesArr.length()) {
+                val cue = cuesArr.optString(i, "").trim()
+                if (cue.isNotBlank() && cue != "null") {
+                    visualCues.add(cue)
+                }
+            }
+        }
 
         val finalReply = reply.ifBlank {
             if (action != null) "${action.intent.displayLabel} hazırlanıyor." else "Tamam."
@@ -378,6 +442,7 @@ class JarvisRepository {
             action = action,
             mood = mood,
             topicTitle = topicTitle,
+            visualCues = visualCues.distinct().take(4),
         )
     }
 
@@ -429,6 +494,10 @@ class JarvisRepository {
             - Şarj / pil durumu: intent="battery_status", target=""
             - Sistem ayarları aç (Wi-Fi, Bluetooth, Ses, Erişilebilirlik, Bildirim, Pil, Konum, Ekran): intent="open_system_settings", target="wifi"|"bluetooth"|"sound"|"accessibility"|"notifications"|"battery"|"location"|"display"|"settings"
             - Ekranı not al ("bu ekranı not al", "şu ekranı kaydet", "bunu not defterine kaydet"): intent="capture_screen_note", target=""
+            - Haber / gündem aç ("bana haberleri de", "gündemden bahset", "gündemde ne var?", "Beşiktaş hakkında haber ver", "ekonomi haberleri"): intent="open_news_briefing". Genel gündem için target="". Kullanıcı belirli bir konu, takım, kişi veya alan hakkında haber istediyse target alanına SADECE temiz konuyu yaz (ör. "Beşiktaş", "ekonomi", "yapay zeka").
+            - Haber kontrolü (kullanıcı haber sunumundayken "sonraki haber", "önceki haber", "bunu detaylandır", "duraklat", "devam et", "sohbete dön/kapat"): intent="news_control", target="next"|"previous"|"detail"|"pause"|"resume"|"close"
+            - Otonom Web Gezintisi & Dosya/APK İndirme ("F-Droid sitesine gir APK indir", "şu PDF'i bulup telefona indir", "X uygulamasının APK'sını indir"): intent="web_download_agent", target="<hedef site URL'si veya uygulama/dosya adı>"
+            - Zamanlı Otomatik Mesaj ("Saat 23:00'ten sonra TikTok'ta Ahmet ve Ayşe'ye '.' mesajı at", "22:30'da WhatsApp'ta Ali'ye selam gönder"): intent="schedule_message", target="<uygulama>:<alıcı1,alıcı2>:<HH:MM>", message="<gönderilecek mesaj>"
 
             EKRAN NOKTASI TIKLAMA KURALI:
             - Kullanıcı ekrandaki bir butona/sekmeye tıklamak, basmak veya girmek istiyorsa ve yukarıdaki KAYITLI DOKUNMA ETİKETLERİ listesinde karşılık gelen bir etiket varsa mode="action", intent="tap_coordinate", target="<listeden birebir etiket>" seç!
@@ -438,12 +507,163 @@ class JarvisRepository {
             $coordsSection
             KULLANICI BAĞLAMI: $contextSection
 
-            ÇIKTI MODLARI VE HUD ETİKETLERİ:
-            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings veya capture_screen_note niyeti varsa mode="action", reply alanına tek satır onay yaz.
+            ÇIKTI MODLARI, HUD ETİKETLERİ VE CANLI GÖRSEL SAHNELER:
+            - MOD 1 (mode="action"): open_app, open_url, search_youtube, set_reminder, go_home, tap_coordinate, torch_control, volume_control, battery_status, open_system_settings, capture_screen_note, open_news_briefing, news_control, web_download_agent veya schedule_message niyeti varsa mode="action", reply alanına tek satır onay yaz.
             - MOD 2 (mode="answer"): Bilgi sorusu, özet, metin üretimi veya sohbetse mode="answer", intent="none" seç.
             - mood alanına yanıtın duygusunu (neutral, serious, analytical, energetic, alert) yaz.
             - topic_title alanına konuyu özetleyen 2-3 kelimelik kısa büyük harfli HUD başlığı yaz (ör. "STRATEJİ ANALİZİ", "GÜNLÜK PLAN", "SİSTEM DURUMU").
+            - visual_cues alanına konuşulan/anlatılan sahneyi canlı sembollerle gösterecek 1-4 görsel anahtar yaz (ör. Beşiktaş stadyumda maç/kavga anlatıyorsan ["eagle_crest", "stadium", "fist_impact"]; indirme ise ["globe_network", "download_file"]; zamanlı mesaj ise ["timer_clock", "message_send"]).
         """.trimIndent()
+    }
+
+    suspend fun curateNewsBriefing(
+        rawArticles: List<RawRssArticle>,
+        userContext: String,
+        topicQuery: String = "",
+    ): Result<List<NewsBriefingItem>> = withContext(Dispatchers.IO) {
+        if (rawArticles.isEmpty()) {
+            return@withContext Result.failure(IllegalStateException("RSS kaynaklarından haber alınamadı."))
+        }
+
+        val cleanTopic = topicQuery.trim()
+        val candidatesText = buildString {
+            rawArticles.forEachIndexed { idx, article ->
+                append("[$idx] (${article.defaultCategory.label} | ${article.sourceName}) ")
+                append("Başlık: ${article.title}")
+                if (article.description.isNotBlank()) {
+                    append(" | Özet: ${article.description.take(220)}")
+                }
+                append('\n')
+            }
+        }
+
+        val contextHint = userContext.trim().ifBlank { "Objektif, sade ve akıcı Türkçe haber sunumu." }
+        val focusInstructions = if (cleanTopic.isNotEmpty()) {
+            """
+            KULLANICI ÖZEL KONU İSTEDİ: "$cleanTopic"
+            1. Tık tuzağı (clickbait) ve alakasız içerikleri kesinlikle ele; YALNIZCA "$cleanTopic" konusuyla doğrudan ilgili en güncel ve önemli en fazla 6 haberi seç.
+            2. "$cleanTopic" ile ilgisiz genel haberleri KESİNLİKLE seçme.
+            """.trimIndent()
+        } else {
+            """
+            1. Tık tuzağı (clickbait), abartılı magazin veya boş içerikleri kesinlikle ele.
+            2. Farklı kategorilerden (GÜNDEM, TEKNOLOJİ, SPOR, DÜNYA) dengeli biçimde EN ÖNEMLİ 6 haberi seç.
+            """.trimIndent()
+        }
+
+        val prompt = """
+            Sen JARVIS'in akıllı haber editörü ve baş spikerisin.
+            Aşağıdaki ham RSS haber listesinden:
+            $focusInstructions
+            3. Her seçilen haber için:
+               - source_index: Aşağıdaki listedeki [indeks] numarasını birebir koru.
+               - category: GÜNDEM, TEKNOLOJİ, SPOR veya DÜNYA değerlerinden biri.
+               - headline: Tık tuzağından arındırılmış, net, okunaklı Türkçe başlık.
+               - brief_summary: Spiker tarzında akıcı, 1-2 cümlelik sesli okunmaya uygun kısa bülten özeti.
+               - detailed_summary: Kullanıcı "detaylandır" dediğinde sunulacak 3-4 cümlelik daha kapsamlı özet (yalnızca verilen metne dayan, bilgi uydurma).
+
+            KULLANICI TERCİHİ: $contextHint
+
+            HAM HABER LİSTESİ:
+            $candidatesText
+        """.trimIndent()
+
+        try {
+            val accumulated = StringBuilder()
+            withTimeout(ATTEMPT_TIMEOUT_MS) {
+                newsBriefingModel.generateContentStream(
+                    content {
+                        text(prompt)
+                    }
+                ).collect { chunk ->
+                    val chunkText = chunk.text.orEmpty()
+                    if (chunkText.isNotEmpty()) {
+                        accumulated.append(chunkText)
+                    }
+                }
+            }
+
+            val raw = accumulated.toString().trim()
+            if (raw.isBlank()) {
+                return@withContext Result.success(fallbackCurateNews(rawArticles, cleanTopic))
+            }
+
+            val root = JSONObject(raw)
+            val arr = root.optJSONArray("items") ?: JSONArray()
+            val curated = mutableListOf<NewsBriefingItem>()
+            val usedIndices = HashSet<Int>()
+
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val srcIdx = obj.optInt("source_index", -1)
+                if (srcIdx !in rawArticles.indices || !usedIndices.add(srcIdx)) continue
+                val source = rawArticles[srcIdx]
+                val category = NewsCategory.fromWire(obj.optString("category", source.defaultCategory.label))
+                val headline = obj.optString("headline", "").trim().ifBlank { source.title }
+                val brief = obj.optString("brief_summary", "").trim()
+                    .ifBlank { source.description.ifBlank { source.title } }
+                val detailed = obj.optString("detailed_summary", "").trim()
+                    .ifBlank { source.description.ifBlank { brief } }
+
+                curated.add(
+                    NewsBriefingItem(
+                        id = "news_${srcIdx}_${headline.hashCode()}",
+                        category = category,
+                        headline = headline,
+                        briefSummary = brief,
+                        detailedSummary = detailed,
+                        sourceName = source.sourceName,
+                        publishedAtText = source.publishedAtText,
+                        imageUrl = source.imageUrl,
+                        articleUrl = source.link,
+                    )
+                )
+                if (curated.size >= 6) break
+            }
+
+            if (curated.isEmpty()) {
+                Result.success(fallbackCurateNews(rawArticles, cleanTopic))
+            } else {
+                Result.success(curated)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "curateNewsBriefing fallback activated: ${e.message}")
+            // Still deliver curated RSS news cleanly if Gemini fails/offline or App Check blocks
+            Result.success(fallbackCurateNews(rawArticles, cleanTopic))
+        }
+    }
+
+    private fun fallbackCurateNews(
+        rawArticles: List<RawRssArticle>,
+        topicQuery: String = "",
+    ): List<NewsBriefingItem> {
+        val relevant = if (topicQuery.isNotBlank()) {
+            rawArticles.filter { com.example.news.RssNewsFetcher.matchesTopic(it, topicQuery) }
+                .ifEmpty { rawArticles }
+        } else {
+            rawArticles
+        }
+        return relevant.take(6).mapIndexed { index, article ->
+            val brief = article.description
+                .takeIf { it.isNotBlank() }
+                ?.let { desc ->
+                    if (desc.length > 180) desc.take(180).substringBeforeLast(" ") + "." else desc
+                }
+                ?: article.title
+            NewsBriefingItem(
+                id = "fallback_${index}_${article.title.hashCode()}",
+                category = article.defaultCategory,
+                headline = article.title,
+                briefSummary = brief,
+                detailedSummary = article.description.ifBlank { article.title },
+                sourceName = article.sourceName,
+                publishedAtText = article.publishedAtText,
+                imageUrl = article.imageUrl,
+                articleUrl = article.link,
+            )
+        }
     }
 
     suspend fun generateNoteFromScreen(

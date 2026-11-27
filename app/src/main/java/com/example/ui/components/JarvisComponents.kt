@@ -31,6 +31,7 @@ import androidx.compose.material.icons.automirrored.rounded.VolumeUp
 import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.BatteryChargingFull
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.CloudDownload
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.EditNote
@@ -42,6 +43,7 @@ import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.ScheduleSend
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.TouchApp
@@ -464,5 +466,9 @@ private fun ActionIntent.icon(): ImageVector = when (this) {
     ActionIntent.BATTERY_STATUS -> Icons.Rounded.BatteryChargingFull
     ActionIntent.OPEN_SYSTEM_SETTINGS -> Icons.Rounded.Settings
     ActionIntent.CAPTURE_SCREEN_NOTE -> Icons.Rounded.EditNote
+    ActionIntent.OPEN_NEWS_BRIEFING -> Icons.Rounded.Public
+    ActionIntent.NEWS_CONTROL -> Icons.Rounded.TouchApp
+    ActionIntent.WEB_DOWNLOAD_AGENT -> Icons.Rounded.CloudDownload
+    ActionIntent.SCHEDULE_MESSAGE -> Icons.Rounded.ScheduleSend
     ActionIntent.NONE -> Icons.Rounded.Code
 }

@@ -7,7 +7,9 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Build
+import android.os.Bundle
 import android.provider.Settings
 import android.util.DisplayMetrics
 import android.util.Log
@@ -16,7 +18,9 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import java.util.LinkedHashSet
+import java.util.Locale
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,6 +35,14 @@ private const val MAX_SCREENSHOT_DIMENSION_PX = 1280
 data class CapturedScreenText(
     val sourcePackage: String,
     val text: String,
+)
+
+data class ScheduledAutomationReport(
+    val success: Boolean,
+    val summary: String,
+    val sentCount: Int,
+    val totalCount: Int,
+    val failedRecipients: List<String>,
 )
 
 class JarvisAccessibilityService : AccessibilityService() {
@@ -271,6 +283,324 @@ class JarvisAccessibilityService : AccessibilityService() {
                 continuation.resume(false)
             }
         }
+    }
+
+    suspend fun executeScheduledMessageAutomation(
+        targetPackage: String,
+        targetAppName: String,
+        recipients: List<String>,
+        messageText: String,
+    ): ScheduledAutomationReport = withContext(Dispatchers.Main) {
+        if (recipients.isEmpty()) {
+            return@withContext ScheduledAutomationReport(
+                success = false,
+                summary = "Gönderim yapılacak alıcı listesi boş.",
+                sentCount = 0,
+                totalCount = 0,
+                failedRecipients = emptyList(),
+            )
+        }
+
+        val resolvedPackage = resolveInstalledMessagingPackage(targetPackage)
+        val launchIntent = packageManager.getLaunchIntentForPackage(resolvedPackage)?.apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+        } ?: return@withContext ScheduledAutomationReport(
+            success = false,
+            summary = "$targetAppName ($targetPackage) cihazda yüklü değil veya başlatılamadı.",
+            sentCount = 0,
+            totalCount = recipients.size,
+            failedRecipients = recipients,
+        )
+
+        try {
+            startActivity(launchIntent)
+        } catch (e: Exception) {
+            return@withContext ScheduledAutomationReport(
+                success = false,
+                summary = "$targetAppName açılamadı: ${e.localizedMessage ?: "yetki hatası"}",
+                sentCount = 0,
+                totalCount = recipients.size,
+                failedRecipients = recipients,
+            )
+        }
+
+        val windowReady = waitForTargetWindow(resolvedPackage, timeoutMs = 4_800L)
+        if (!windowReady) {
+            return@withContext ScheduledAutomationReport(
+                success = false,
+                summary = "$targetAppName ön plana getirilemedi.",
+                sentCount = 0,
+                totalCount = recipients.size,
+                failedRecipients = recipients,
+            )
+        }
+
+        delay(1_100L)
+
+        // Open Inbox / Chats tab if present (e.g. TikTok Inbox, Instagram DM)
+        rootInActiveWindow?.let { root ->
+            if (resolvedPackage.contains("musically") || resolvedPackage.contains("trill")) {
+                clickNodeByLabels(root, listOf("gelen kutusu", "inbox", "mesajlar", "messages"))
+                delay(1_200L)
+            } else if (resolvedPackage.contains("instagram")) {
+                clickNodeByLabels(root, listOf("mesajlar", "messages", "direct"))
+                delay(1_100L)
+            }
+        }
+
+        var sentCount = 0
+        val failed = mutableListOf<String>()
+
+        for ((idx, recipient) in recipients.withIndex()) {
+            val ok = sendSingleRecipientViaUi(recipient = recipient, messageText = messageText)
+            if (ok) {
+                sentCount++
+            } else {
+                failed.add(recipient)
+            }
+            if (idx < recipients.lastIndex) {
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(700L)
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                delay(700L)
+            }
+        }
+
+        val allSent = sentCount == recipients.size && failed.isEmpty()
+        val summary = when {
+            allSent -> "$targetAppName üzerinden ${recipients.joinToString(", ")} kişilerine \"$messageText\" gönderildi."
+            sentCount > 0 -> "$targetAppName kısmi gönderim ($sentCount/${recipients.size}). Başarısız: ${failed.joinToString(", ")}"
+            else -> "$targetAppName içinde hedef sohbet/gönder butonu bulunamadı (${failed.joinToString(", ")})."
+        }
+
+        ScheduledAutomationReport(
+            success = allSent,
+            summary = summary,
+            sentCount = sentCount,
+            totalCount = recipients.size,
+            failedRecipients = failed,
+        )
+    }
+
+    private fun resolveInstalledMessagingPackage(preferred: String): String {
+        if (packageManager.getLaunchIntentForPackage(preferred) != null) return preferred
+        if (preferred == "com.zhiliaoapp.musically" &&
+            packageManager.getLaunchIntentForPackage("com.ss.android.ugc.trill") != null
+        ) {
+            return "com.ss.android.ugc.trill"
+        }
+        if (preferred == "com.whatsapp" &&
+            packageManager.getLaunchIntentForPackage("com.whatsapp.w4b") != null
+        ) {
+            return "com.whatsapp.w4b"
+        }
+        return preferred
+    }
+
+    private suspend fun waitForTargetWindow(targetPackage: String, timeoutMs: Long): Boolean {
+        val start = System.currentTimeMillis()
+        while (System.currentTimeMillis() - start < timeoutMs) {
+            val activePkg = rootInActiveWindow?.packageName?.toString()
+            if (activePkg == targetPackage || _currentForegroundPackage.value == targetPackage) {
+                return true
+            }
+            delay(250L)
+        }
+        return false
+    }
+
+    private suspend fun sendSingleRecipientViaUi(
+        recipient: String,
+        messageText: String,
+    ): Boolean {
+        val normRecipient = normalizeUiText(recipient)
+        if (normRecipient.isBlank()) return false
+
+        // Step 1: Check if recipient chat row is already visible on Inbox/Chats screen
+        var root = rootInActiveWindow ?: return false
+        var openedChat = clickChatRowContaining(root, normRecipient)
+
+        // Step 2: Otherwise tap Search / New Message and type recipient name
+        if (!openedChat) {
+            val searchEdit = findEditableNodes(root).firstOrNull()
+            if (searchEdit != null) {
+                setNodeText(searchEdit, recipient)
+                delay(1_200L)
+            } else {
+                clickNodeByLabels(root, listOf("ara", "search", "yeni sohbet", "new chat", "new message"))
+                delay(800L)
+                root = rootInActiveWindow ?: return false
+                val activeEdit = findEditableNodes(root).firstOrNull()
+                if (activeEdit != null) {
+                    setNodeText(activeEdit, recipient)
+                    delay(1_300L)
+                }
+            }
+            root = rootInActiveWindow ?: return false
+            openedChat = clickChatRowContaining(root, normRecipient)
+        }
+
+        if (!openedChat) return false
+        delay(1_100L)
+
+        // Step 3: Locate bottom message EditText inside conversation screen
+        root = rootInActiveWindow ?: return false
+        val messageInput = findMessageInputNode(root) ?: return false
+        val typed = setNodeText(messageInput, messageText)
+        if (!typed) return false
+        delay(500L)
+
+        // Step 4: Locate and tap Send button
+        root = rootInActiveWindow ?: return false
+        return clickSendButton(root, messageInput)
+    }
+
+    private fun collectAllNodes(root: AccessibilityNodeInfo?, maxNodes: Int = 320): List<AccessibilityNodeInfo> {
+        if (root == null) return emptyList()
+        val list = ArrayList<AccessibilityNodeInfo>(64)
+        val queue = ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty() && list.size < maxNodes) {
+            val node = queue.removeFirst()
+            list.add(node)
+            val count = node.childCount
+            for (i in 0 until count) {
+                val child = try {
+                    node.getChild(i)
+                } catch (_: Exception) {
+                    null
+                }
+                if (child != null) queue.add(child)
+            }
+        }
+        return list
+    }
+
+    private suspend fun clickNodeByLabels(
+        root: AccessibilityNodeInfo,
+        labels: List<String>,
+    ): Boolean {
+        val nodes = collectAllNodes(root)
+        val target = nodes.firstOrNull { node ->
+            if (!node.isVisibleToUser) return@firstOrNull false
+            val text = normalizeUiText(node.text?.toString().orEmpty())
+            val desc = normalizeUiText(node.contentDescription?.toString().orEmpty())
+            labels.any { lbl -> text == lbl || desc == lbl || text.contains(lbl) || desc.contains(lbl) }
+        } ?: return false
+        return performReliableClick(target)
+    }
+
+    private suspend fun clickChatRowContaining(
+        root: AccessibilityNodeInfo,
+        normRecipient: String,
+    ): Boolean {
+        val nodes = collectAllNodes(root)
+        val match = nodes.firstOrNull { node ->
+            if (!node.isVisibleToUser || node.isEditable) return@firstOrNull false
+            val text = normalizeUiText(node.text?.toString().orEmpty())
+            val desc = normalizeUiText(node.contentDescription?.toString().orEmpty())
+            text.contains(normRecipient) || desc.contains(normRecipient)
+        } ?: return false
+        return performReliableClick(match)
+    }
+
+    private fun findEditableNodes(root: AccessibilityNodeInfo): List<AccessibilityNodeInfo> {
+        return collectAllNodes(root)
+            .filter { node ->
+                node.isVisibleToUser &&
+                    (node.isEditable || node.className?.toString()?.contains("EditText", ignoreCase = true) == true)
+            }
+            .sortedBy { node ->
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                rect.top
+            }
+    }
+
+    private fun findMessageInputNode(root: AccessibilityNodeInfo): AccessibilityNodeInfo? {
+        val edits = findEditableNodes(root)
+        if (edits.isEmpty()) return null
+        val labeled = edits.firstOrNull { node ->
+            val hint = normalizeUiText((node.hintText ?: node.text ?: node.contentDescription)?.toString().orEmpty())
+            hint.contains("mesaj") || hint.contains("message") || hint.contains("yaz") || hint.contains("send")
+        }
+        return labeled ?: edits.lastOrNull()
+    }
+
+    private fun setNodeText(node: AccessibilityNodeInfo, text: String): Boolean {
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS)
+        val args = Bundle().apply {
+            putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, text)
+        }
+        return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args)
+    }
+
+    private suspend fun clickSendButton(
+        root: AccessibilityNodeInfo,
+        inputNode: AccessibilityNodeInfo,
+    ): Boolean {
+        val inputRect = Rect()
+        inputNode.getBoundsInScreen(inputRect)
+        val nodes = collectAllNodes(root)
+
+        val labeledSend = nodes.firstOrNull { node ->
+            if (!node.isVisibleToUser || node.isEditable) return@firstOrNull false
+            val text = normalizeUiText(node.text?.toString().orEmpty())
+            val desc = normalizeUiText(node.contentDescription?.toString().orEmpty())
+            text == "gonder" || text == "send" || text == "ilet" ||
+                desc.contains("gonder") || desc.contains("send")
+        }
+        if (labeledSend != null && performReliableClick(labeledSend)) return true
+
+        // Spatial fallback: clickable button/icon to the right of the message input on roughly the same row
+        val adjacentRight = nodes
+            .filter { node ->
+                if (!node.isVisibleToUser || node.isEditable || !node.isClickable) return@filter false
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                r.left >= inputRect.right - 20 &&
+                    kotlin.math.abs(r.centerY() - inputRect.centerY()) <= (inputRect.height().coerceAtLeast(80) * 1.4f)
+            }
+            .minByOrNull { node ->
+                val r = Rect()
+                node.getBoundsInScreen(r)
+                r.left
+            }
+
+        return adjacentRight != null && performReliableClick(adjacentRight)
+    }
+
+    private suspend fun performReliableClick(node: AccessibilityNodeInfo): Boolean {
+        var current: AccessibilityNodeInfo? = node
+        repeat(4) {
+            if (current != null && current.isClickable) {
+                if (current.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true
+            }
+            current = try {
+                current?.parent
+            } catch (_: Exception) {
+                null
+            }
+        }
+        val rect = Rect()
+        node.getBoundsInScreen(rect)
+        if (!rect.isEmpty) {
+            return dispatchTapAtPixel(rect.centerX().toFloat(), rect.centerY().toFloat())
+        }
+        return false
+    }
+
+    private fun normalizeUiText(text: String): String {
+        return text
+            .lowercase(Locale.ROOT)
+            .replace('ç', 'c')
+            .replace('ğ', 'g')
+            .replace('ı', 'i')
+            .replace('İ', 'i')
+            .replace('ö', 'o')
+            .replace('ş', 's')
+            .replace('ü', 'u')
+            .trim()
     }
 
     companion object {

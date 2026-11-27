@@ -15,6 +15,9 @@ import com.example.ai.clearCustomDebugToken
 import com.example.ai.generateAndSaveDebugToken
 import com.example.ai.getAppCheckStatus
 import com.example.ai.saveCustomDebugToken
+import com.example.automation.ScheduledMessageParser
+import com.example.automation.ScheduledMessageReceiver
+import com.example.automation.ScheduledMessageScheduler
 import com.example.data.local.ChatMessageEntity
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
@@ -22,6 +25,8 @@ import com.example.data.local.NoteEntity
 import com.example.data.local.NoteJsonStore
 import com.example.data.local.ProactiveAlertEntity
 import com.example.data.local.ReminderEntity
+import com.example.data.local.ScheduledMessageLogEntity
+import com.example.data.local.ScheduledMessageRuleEntity
 import com.example.data.local.TapCoordinateEntity
 import com.example.data.local.toDomain
 import com.example.data.preferences.JarvisPreferences
@@ -36,18 +41,31 @@ import com.example.model.JarvisMood
 import com.example.model.NoteItem
 import com.example.model.ProactiveAlertItem
 import com.example.model.ReminderItem
+import com.example.model.ScheduledMessageLogItem
+import com.example.model.ScheduledMessageRuleItem
 import com.example.model.TapCoordinateItem
+import com.example.model.VisualCueItem
+import com.example.model.VisualCueResolver
+import com.example.news.HandSwipeGesture
+import com.example.news.NewsBriefingState
+import com.example.news.RssNewsFetcher
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
+import com.example.system.AppliedVoiceInfo
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
+import com.example.system.JarvisTtsVoiceHelper
 import com.example.system.LocalQuickCommandMatcher
 import com.example.system.ReminderScheduler
 import com.example.system.VoiceInputManager
 import com.example.system.VoiceInputState
+import com.example.webagent.WebAgentUiState
+import com.example.webagent.WebDownloadAgent
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -64,6 +82,8 @@ data class JarvisUiState(
     val coordinates: List<TapCoordinateItem> = emptyList(),
     val proactiveAlerts: List<ProactiveAlertItem> = emptyList(),
     val notes: List<NoteItem> = emptyList(),
+    val scheduledMessageRules: List<ScheduledMessageRuleItem> = emptyList(),
+    val scheduledMessageLogs: List<ScheduledMessageLogItem> = emptyList(),
     val preferences: JarvisPreferences = JarvisPreferences(),
     val installedApps: List<InstalledAppInfo> = emptyList(),
     val voiceState: VoiceInputState = VoiceInputState(),
@@ -78,6 +98,10 @@ data class JarvisUiState(
     val appCheckStatus: AppCheckStatusInfo = AppCheckStatusInfo(),
     val currentMood: JarvisMood = JarvisMood.NEUTRAL,
     val currentTopicTitle: String = "",
+    val newsBriefing: NewsBriefingState = NewsBriefingState(),
+    val ttsVoiceInfo: AppliedVoiceInfo = AppliedVoiceInfo(),
+    val webAgentState: WebAgentUiState = WebAgentUiState(),
+    val visualCues: List<VisualCueItem> = emptyList(),
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -87,8 +111,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val noteStore = NoteJsonStore(application, dao)
     private val prefsRepo = UserPreferencesRepository(application)
     private val aiRepository = JarvisRepository()
+    private val rssFetcher = RssNewsFetcher()
     private val actionExecutor = JarvisActionExecutor(application, dao, aiRepository)
     private val voiceManager = VoiceInputManager(application)
+    private val webDownloadAgent = WebDownloadAgent(application)
 
     private val installedAppsFlow = MutableStateFlow<List<InstalledAppInfo>>(emptyList())
     private val isProcessingFlow = MutableStateFlow(false)
@@ -99,17 +125,32 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     private val appCheckStatusFlow = MutableStateFlow(getAppCheckStatus(application))
     private val currentMoodFlow = MutableStateFlow(JarvisMood.NEUTRAL)
     private val currentTopicTitleFlow = MutableStateFlow("")
+    private val newsBriefingFlow = MutableStateFlow(NewsBriefingState())
+    private val ttsVoiceInfoFlow = MutableStateFlow(AppliedVoiceInfo())
+    private val visualCuesFlow = MutableStateFlow<List<VisualCueItem>>(emptyList())
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var latestPrefs = JarvisPreferences()
+    private var voiceConfiguredFromPrefs = false
+    private var activeNewsUtteranceId: String? = null
+    private var newsFetchJob: Job? = null
+    private var gestureBadgeResetJob: Job? = null
+    private var visualCueResetJob: Job? = null
+
+    private data class ExtrasPersistentSnapshot(
+        val preferences: JarvisPreferences,
+        val notes: List<NoteEntity>,
+        val scheduledRules: List<ScheduledMessageRuleEntity>,
+        val scheduledLogs: List<ScheduledMessageLogEntity>,
+    )
 
     private data class PersistentSnapshot(
         val messages: List<ChatMessageEntity>,
         val reminders: List<ReminderEntity>,
         val coordinates: List<TapCoordinateEntity>,
         val proactiveAlerts: List<ProactiveAlertEntity>,
-        val notes: List<NoteEntity>,
-        val preferences: JarvisPreferences,
+        val extras: ExtrasPersistentSnapshot,
     )
 
     private data class RuntimeSnapshot(
@@ -128,25 +169,41 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val toast: String?,
     )
 
-    private val prefsAndNotesFlow: Flow<Pair<JarvisPreferences, List<NoteEntity>>> = combine(
+    private data class HudVisualSnapshot(
+        val mood: JarvisMood,
+        val topicTitle: String,
+        val voiceInfo: AppliedVoiceInfo,
+        val visualCues: List<VisualCueItem>,
+        val webAgentState: WebAgentUiState,
+    )
+
+    private val extrasPersistentFlow: Flow<ExtrasPersistentSnapshot> = combine(
         prefsRepo.preferences,
         dao.observeNotes(),
-    ) { prefs, notes -> prefs to notes }
+        dao.observeScheduledRules(),
+        dao.observeScheduledLogs(),
+    ) { prefs, notes, rules, logs ->
+        ExtrasPersistentSnapshot(
+            preferences = prefs,
+            notes = notes,
+            scheduledRules = rules,
+            scheduledLogs = logs,
+        )
+    }
 
     private val persistentFlow: Flow<PersistentSnapshot> = combine(
         dao.observeMessages(),
         dao.observeReminders(),
         dao.observeCoordinates(),
         dao.observeActiveProactiveAlerts(),
-        prefsAndNotesFlow,
-    ) { msgEntities, remEntities, coordEntities, alertEntities, (prefs, noteEntities) ->
+        extrasPersistentFlow,
+    ) { msgEntities, remEntities, coordEntities, alertEntities, extras ->
         PersistentSnapshot(
             messages = msgEntities,
             reminders = remEntities,
             coordinates = coordEntities,
             proactiveAlerts = alertEntities,
-            notes = noteEntities,
-            preferences = prefs,
+            extras = extras,
         )
     }
 
@@ -182,17 +239,29 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    private val hudMetaFlow: Flow<Pair<JarvisMood, String>> = combine(
+    private val hudMetaFlow: Flow<HudVisualSnapshot> = combine(
         currentMoodFlow,
         currentTopicTitleFlow,
-    ) { mood, topic -> mood to topic }
+        ttsVoiceInfoFlow,
+        visualCuesFlow,
+        webDownloadAgent.state,
+    ) { mood, topic, voiceInfo, cues, webState ->
+        HudVisualSnapshot(
+            mood = mood,
+            topicTitle = topic,
+            voiceInfo = voiceInfo,
+            visualCues = cues,
+            webAgentState = webState,
+        )
+    }
 
     val uiState: StateFlow<JarvisUiState> = combine(
         persistentFlow,
         runtimeFlow,
         transientFlow,
         hudMetaFlow,
-    ) { persistent, runtime, transient, (mood, topicTitle) ->
+        newsBriefingFlow,
+    ) { persistent, runtime, transient, hudMeta, newsState ->
         val fgPkg = runtime.foregroundPkg
         val fgName = if (!fgPkg.isNullOrBlank()) {
             actionExecutor.resolveAppDisplayName(fgPkg)
@@ -221,8 +290,10 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             },
             coordinates = persistent.coordinates.map { it.toDomain() },
             proactiveAlerts = persistent.proactiveAlerts.map { it.toProactiveDomain() },
-            notes = persistent.notes.map { it.toDomain() },
-            preferences = persistent.preferences,
+            notes = persistent.extras.notes.map { it.toDomain() },
+            scheduledMessageRules = persistent.extras.scheduledRules.map { it.toDomain() },
+            scheduledMessageLogs = persistent.extras.scheduledLogs.map { it.toDomain() },
+            preferences = persistent.extras.preferences,
             installedApps = runtime.apps,
             voiceState = runtime.voice,
             detectedForegroundPackage = fgPkg,
@@ -234,8 +305,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             lastFailedPrompt = transient.failedPrompt,
             toastMessage = transient.toast,
             appCheckStatus = runtime.appCheckStatus,
-            currentMood = mood,
-            currentTopicTitle = topicTitle,
+            currentMood = hudMeta.mood,
+            currentTopicTitle = hudMeta.topicTitle,
+            newsBriefing = newsState,
+            ttsVoiceInfo = hudMeta.voiceInfo,
+            webAgentState = hudMeta.webAgentState,
+            visualCues = hudMeta.visualCues,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -248,6 +323,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     init {
         refreshInstalledApps()
         initTextToSpeech()
+        viewModelScope.launch {
+            prefsRepo.preferences.collect { prefs ->
+                val voiceChanged = prefs.maleVoiceEnabled != latestPrefs.maleVoiceEnabled ||
+                    prefs.selectedTtsVoiceName != latestPrefs.selectedTtsVoiceName
+                latestPrefs = prefs
+                if (ttsReady && (!voiceConfiguredFromPrefs || voiceChanged)) {
+                    voiceConfiguredFromPrefs = true
+                    ttsVoiceInfoFlow.value = JarvisTtsVoiceHelper.configureTurkishVoice(tts, prefs)
+                }
+            }
+        }
         viewModelScope.launch {
             voiceManager.state.collect { voice ->
                 if (wasListeningInApp && !voice.isListening && uiState.value.preferences.wakeWordEnabled) {
@@ -265,15 +351,35 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     val res = tts?.setLanguage(Locale("tr", "TR"))
                     ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
                         res != TextToSpeech.LANG_NOT_SUPPORTED
+                    if (ttsReady) {
+                        voiceConfiguredFromPrefs = true
+                        ttsVoiceInfoFlow.value = JarvisTtsVoiceHelper.configureTurkishVoice(tts, latestPrefs)
+                    }
                     tts?.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {}
                         override fun onDone(utteranceId: String?) {
-                            speakingMessageIdFlow.value = null
+                            if (utteranceId != null && utteranceId.startsWith("jarvis_news_")) {
+                                viewModelScope.launch {
+                                    onNewsUtteranceFinished(utteranceId)
+                                }
+                            } else {
+                                speakingMessageIdFlow.value = null
+                                scheduleVisualCueClear(delayMs = 2_400L)
+                            }
                         }
 
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
-                            speakingMessageIdFlow.value = null
+                            if (utteranceId != null && utteranceId.startsWith("jarvis_news_")) {
+                                viewModelScope.launch {
+                                    if (utteranceId == activeNewsUtteranceId) {
+                                        activeNewsUtteranceId = null
+                                        newsBriefingFlow.value = newsBriefingFlow.value.copy(isSpeakingBriefing = false)
+                                    }
+                                }
+                            } else {
+                                speakingMessageIdFlow.value = null
+                            }
                         }
                     })
                 }
@@ -380,9 +486,51 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                     return@launch
                 }
 
-                // 0-Token Fast Path 2: unambiguous local device/screen-note commands
-                val localAction = LocalQuickCommandMatcher.match(text)
+                // 0-Token Fast Path 2: unambiguous local device/screen-note/news commands
+                val localAction = LocalQuickCommandMatcher.match(
+                    rawPrompt = text,
+                    isNewsModeActive = current.newsBriefing.isVisible,
+                )
                 if (localAction != null) {
+                    if (localAction.intent == ActionIntent.OPEN_NEWS_BRIEFING) {
+                        val topic = localAction.target.trim()
+                        currentMoodFlow.value = JarvisMood.SERIOUS
+                        currentTopicTitleFlow.value = if (topic.isNotBlank()) {
+                            "GÜNDEM // ${topic.uppercase(Locale("tr", "TR"))}"
+                        } else {
+                            "JARVIS // GÜNDEM"
+                        }
+                        dao.insertMessage(
+                            ChatMessageEntity(
+                                isUser = false,
+                                text = if (topic.isNotBlank()) {
+                                    "\"$topic\" ile ilgili güncel haberler hazırlanıyor."
+                                } else {
+                                    "Güncel gündem bülteni hazırlanıyor."
+                                },
+                                intentWire = localAction.intent.wireValue,
+                                target = topic,
+                                actionStatus = ActionExecutionStatus.EXECUTED.name,
+                                actionStatusDetail = "Haber sunumu açıldı.",
+                                timestampMillis = System.currentTimeMillis(),
+                            )
+                        )
+                        openNewsBriefing(topic)
+                        return@launch
+                    }
+                    if (localAction.intent == ActionIntent.NEWS_CONTROL) {
+                        handleNewsControl(localAction.target)
+                        return@launch
+                    }
+                    if (localAction.intent == ActionIntent.WEB_DOWNLOAD_AGENT) {
+                        triggerWebAgentTask(
+                            rawTarget = localAction.target,
+                            confirmBeforeDownload = snapshotPrefs.webAgentConfirmBeforeDownload,
+                            insertReplyMessage = true,
+                        )
+                        return@launch
+                    }
+
                     val execResult = actionExecutor.execute(
                         action = localAction,
                         activeProfilePackage = activeProfilePkg,
@@ -411,6 +559,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             actionStatusDetail = execResult.detail,
                             timestampMillis = System.currentTimeMillis(),
                         )
+                    )
+                    showVisualCuesForNarration(
+                        aiCues = emptyList(),
+                        text = replyText,
+                        actionIntent = localAction.intent,
                     )
                     speakIfEnabled(snapshotPrefs.speakReplies, insertedId, replyText)
                     return@launch
@@ -453,6 +606,39 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             )
                         )
 
+                        if (action?.intent == ActionIntent.OPEN_NEWS_BRIEFING) {
+                            val topic = action.target.trim()
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Haber sunumu açıldı.",
+                            )
+                            openNewsBriefing(topic)
+                            return@fold
+                        }
+                        if (action?.intent == ActionIntent.NEWS_CONTROL) {
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Haber kontrolü uygulandı.",
+                            )
+                            handleNewsControl(action.target)
+                            return@fold
+                        }
+                        if (action?.intent == ActionIntent.WEB_DOWNLOAD_AGENT) {
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Web indirme ajanı başlatıldı.",
+                            )
+                            triggerWebAgentTask(
+                                rawTarget = action.target.ifBlank { text },
+                                confirmBeforeDownload = snapshotPrefs.webAgentConfirmBeforeDownload,
+                                insertReplyMessage = false,
+                            )
+                            return@fold
+                        }
+
                         var spokenText = reply.ttsSummary
                         if (action != null && snapshotPrefs.autoExecuteActions) {
                             val execResult = actionExecutor.execute(
@@ -471,7 +657,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 action.intent == ActionIntent.BATTERY_STATUS ||
                                 action.intent == ActionIntent.TORCH_CONTROL ||
                                 action.intent == ActionIntent.VOLUME_CONTROL ||
-                                action.intent == ActionIntent.CAPTURE_SCREEN_NOTE
+                                action.intent == ActionIntent.CAPTURE_SCREEN_NOTE ||
+                                action.intent == ActionIntent.SCHEDULE_MESSAGE
                             ) {
                                 if (execResult.detail.isNotBlank()) {
                                     spokenText = execResult.detail
@@ -479,6 +666,11 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                             }
                         }
 
+                        showVisualCuesForNarration(
+                            aiCues = reply.visualCues,
+                            text = reply.text,
+                            actionIntent = action?.intent,
+                        )
                         speakIfEnabled(snapshotPrefs.speakReplies, insertedId, spokenText)
                     },
                     onFailure = { throwable ->
@@ -518,6 +710,14 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun executeActionForMessage(messageId: Long, action: JarvisAction) {
+        if (action.intent == ActionIntent.WEB_DOWNLOAD_AGENT) {
+            triggerWebAgentTask(
+                rawTarget = action.target,
+                confirmBeforeDownload = uiState.value.preferences.webAgentConfirmBeforeDownload,
+                insertReplyMessage = false,
+            )
+            return
+        }
         viewModelScope.launch {
             val current = uiState.value
             val (activeProfilePkg, _) = resolveActiveProfilePair(
@@ -536,6 +736,204 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             if (execResult.detail.isNotBlank()) {
                 toastFlow.value = execResult.detail
             }
+        }
+    }
+
+    // ---- Visual Narration Cues & Web Agent & Scheduled Messaging ----
+
+    private fun showVisualCuesForNarration(
+        aiCues: List<String>,
+        text: String,
+        actionIntent: ActionIntent? = null,
+    ) {
+        val cues = VisualCueResolver.resolveCues(aiCues, text, actionIntent)
+        visualCuesFlow.value = cues
+        val isSpeakingNow = uiState.value.preferences.speakReplies && ttsReady
+        if (!isSpeakingNow) {
+            scheduleVisualCueClear(delayMs = 11_000L)
+        } else {
+            visualCueResetJob?.cancel()
+        }
+    }
+
+    private fun scheduleVisualCueClear(delayMs: Long) {
+        visualCueResetJob?.cancel()
+        visualCueResetJob = viewModelScope.launch {
+            delay(delayMs)
+            if (speakingMessageIdFlow.value == null) {
+                visualCuesFlow.value = emptyList()
+            }
+        }
+    }
+
+    private fun triggerWebAgentTask(
+        rawTarget: String,
+        confirmBeforeDownload: Boolean,
+        insertReplyMessage: Boolean,
+    ) {
+        val target = rawTarget.trim()
+        currentMoodFlow.value = JarvisMood.ANALYTICAL
+        currentTopicTitleFlow.value = "WEB AJANI // İNDİRME"
+        showVisualCuesForNarration(
+            aiCues = listOf("globe_network", "download_file"),
+            text = target,
+            actionIntent = ActionIntent.WEB_DOWNLOAD_AGENT,
+        )
+
+        if (insertReplyMessage) {
+            viewModelScope.launch {
+                dao.insertMessage(
+                    ChatMessageEntity(
+                        isUser = false,
+                        text = "Web ajanı görevlendirildi: \"$target\"",
+                        intentWire = ActionIntent.WEB_DOWNLOAD_AGENT.wireValue,
+                        target = target,
+                        actionStatus = ActionExecutionStatus.EXECUTED.name,
+                        actionStatusDetail = "Site taranıyor…",
+                        timestampMillis = System.currentTimeMillis(),
+                    )
+                )
+            }
+        }
+
+        webDownloadAgent.startAutonomousTask(
+            rawRequest = target,
+            confirmBeforeDownload = confirmBeforeDownload,
+        ) { statusMsg, isError ->
+            if (isError) {
+                currentMoodFlow.value = JarvisMood.ALERT
+            }
+            if (latestPrefs.speakReplies && ttsReady) {
+                tts?.speak(statusMsg, TextToSpeech.QUEUE_FLUSH, null, "jarvis_web_agent_${System.nanoTime()}")
+            }
+        }
+    }
+
+    fun confirmWebDownload() {
+        webDownloadAgent.confirmPendingDownload { statusMsg, isError ->
+            if (isError) currentMoodFlow.value = JarvisMood.ALERT
+            if (latestPrefs.speakReplies && ttsReady) {
+                tts?.speak(statusMsg, TextToSpeech.QUEUE_FLUSH, null, "jarvis_web_agent_${System.nanoTime()}")
+            }
+        }
+    }
+
+    fun dismissWebAgent() {
+        webDownloadAgent.cancelOrDismiss()
+        currentTopicTitleFlow.value = ""
+    }
+
+    fun openCompletedWebDownload() {
+        val (_, detail) = webDownloadAgent.openDownloadedFile()
+        toastFlow.value = detail
+    }
+
+    fun setWebAgentConfirmBeforeDownload(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setWebAgentConfirmBeforeDownload(enabled)
+        }
+    }
+
+    fun saveScheduledMessageRule(
+        existingId: Long?,
+        appName: String,
+        appPackage: String,
+        recipientsRaw: String,
+        messageText: String,
+        hour: Int,
+        minute: Int,
+        repeatDaily: Boolean,
+    ) {
+        val cleanRecipients = recipientsRaw.split(",").map { it.trim() }.filter { it.isNotBlank() }
+        if (cleanRecipients.isEmpty()) {
+            toastFlow.value = "En az bir alıcı adı yazmalısın."
+            return
+        }
+        val cleanMsg = messageText.ifBlank { "." }
+        val resolvedPair = if (appPackage.isNotBlank()) {
+            appName.ifBlank { actionExecutor.resolveAppDisplayName(appPackage) } to appPackage
+        } else {
+            ScheduledMessageParser.resolveKnownAppPackage(appName, installedAppsFlow.value)
+                ?: ("TikTok" to "com.zhiliaoapp.musically")
+        }
+        val triggerAt = ScheduledMessageScheduler.computeNextTriggerMillis(hour, minute)
+        val formattedTime = String.format(Locale.ROOT, "%02d:%02d", hour, minute)
+
+        viewModelScope.launch {
+            if (existingId != null && existingId > 0L) {
+                dao.updateScheduledRule(
+                    id = existingId,
+                    targetAppPackage = resolvedPair.second,
+                    targetAppName = resolvedPair.first,
+                    recipientsCsv = cleanRecipients.joinToString(", "),
+                    messageText = cleanMsg,
+                    triggerHour = hour.coerceIn(0, 23),
+                    triggerMinute = minute.coerceIn(0, 59),
+                    repeatDaily = repeatDaily,
+                    isEnabled = true,
+                    nextTriggerAtMillis = triggerAt,
+                )
+                ScheduledMessageScheduler.scheduleRule(getApplication(), existingId, triggerAt)
+                toastFlow.value = "Zamanlı mesaj güncellendi ($formattedTime)."
+            } else {
+                val newId = dao.insertScheduledRule(
+                    ScheduledMessageRuleEntity(
+                        targetAppPackage = resolvedPair.second,
+                        targetAppName = resolvedPair.first,
+                        recipientsCsv = cleanRecipients.joinToString(", "),
+                        messageText = cleanMsg,
+                        triggerHour = hour.coerceIn(0, 23),
+                        triggerMinute = minute.coerceIn(0, 59),
+                        repeatDaily = repeatDaily,
+                        isEnabled = true,
+                        nextTriggerAtMillis = triggerAt,
+                        lastStatus = "Zamanlandı ($formattedTime)",
+                    )
+                )
+                ScheduledMessageScheduler.scheduleRule(getApplication(), newId, triggerAt)
+                toastFlow.value = "Zamanlı mesaj kuruldu: $formattedTime"
+            }
+        }
+    }
+
+    fun toggleScheduledMessageRule(rule: ScheduledMessageRuleItem) {
+        viewModelScope.launch {
+            val nextEnabled = !rule.isEnabled
+            val nextTrigger = if (nextEnabled) {
+                ScheduledMessageScheduler.computeNextTriggerMillis(rule.triggerHour, rule.triggerMinute)
+            } else {
+                0L
+            }
+            dao.setScheduledRuleEnabled(rule.id, nextEnabled, nextTrigger)
+            if (nextEnabled) {
+                ScheduledMessageScheduler.scheduleRule(getApplication(), rule.id, nextTrigger)
+                toastFlow.value = "${rule.targetAppName} zamanlı mesajı aktif."
+            } else {
+                ScheduledMessageScheduler.cancelRule(getApplication(), rule.id)
+                toastFlow.value = "${rule.targetAppName} zamanlı mesajı durduruldu."
+            }
+        }
+    }
+
+    fun deleteScheduledMessageRule(ruleId: Long) {
+        viewModelScope.launch {
+            ScheduledMessageScheduler.cancelRule(getApplication(), ruleId)
+            dao.deleteScheduledRule(ruleId)
+            toastFlow.value = "Zamanlı mesaj kuralı silindi."
+        }
+    }
+
+    fun runScheduledMessageRuleNow(rule: ScheduledMessageRuleItem) {
+        viewModelScope.launch {
+            val summary = ScheduledMessageReceiver.executeRule(getApplication(), rule.id)
+            toastFlow.value = summary
+        }
+    }
+
+    fun clearScheduledMessageLogs() {
+        viewModelScope.launch {
+            dao.clearScheduledLogs()
+            toastFlow.value = "Gönderim günlükleri temizlendi."
         }
     }
 
@@ -688,6 +1086,51 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun setMaleVoiceEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setMaleVoiceEnabled(enabled)
+            val updated = latestPrefs.copy(maleVoiceEnabled = enabled)
+            latestPrefs = updated
+            if (ttsReady) {
+                voiceConfiguredFromPrefs = true
+                ttsVoiceInfoFlow.value = JarvisTtsVoiceHelper.configureTurkishVoice(tts, updated)
+            }
+        }
+    }
+
+    fun setSelectedTtsVoiceName(voiceName: String) {
+        viewModelScope.launch {
+            prefsRepo.setSelectedTtsVoiceName(voiceName)
+            val updated = latestPrefs.copy(selectedTtsVoiceName = voiceName)
+            latestPrefs = updated
+            if (ttsReady) {
+                voiceConfiguredFromPrefs = true
+                ttsVoiceInfoFlow.value = JarvisTtsVoiceHelper.configureTurkishVoice(tts, updated)
+            }
+        }
+    }
+
+    fun testJarvisVoice() {
+        if (!ttsReady) {
+            toastFlow.value = "Türkçe ses motoru henüz hazır değil."
+            return
+        }
+        ttsVoiceInfoFlow.value = JarvisTtsVoiceHelper.configureTurkishVoice(tts, latestPrefs)
+        tts?.speak(
+            "Merhaba, ben JARVIS. Yeni ses profilim aktif.",
+            TextToSpeech.QUEUE_FLUSH,
+            null,
+            "jarvis_voice_test_${System.nanoTime()}",
+        )
+    }
+
+    fun openInstallTtsVoices() {
+        val opened = JarvisTtsVoiceHelper.openInstallTtsData(getApplication())
+        if (!opened) {
+            toastFlow.value = "Sistem ses ayarları açılamadı."
+        }
+    }
+
     fun setPersistentTriggerEnabled(enabled: Boolean) {
         viewModelScope.launch {
             prefsRepo.setPersistentTriggerEnabled(enabled)
@@ -752,6 +1195,268 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             } else {
                 "Proaktif WhatsApp takibi kapatıldı."
             }
+        }
+    }
+
+    fun setNewsAirGestureEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setNewsAirGestureEnabled(enabled)
+            toastFlow.value = if (enabled) {
+                "Haber modunda el hareketi kontrolü açıldı."
+            } else {
+                "Haber modunda el hareketi kontrolü kapatıldı."
+            }
+        }
+    }
+
+    // ---- News Briefing & Air Gesture Controls ----
+
+    fun refreshNewsBriefing() {
+        openNewsBriefing(newsBriefingFlow.value.topicQuery)
+    }
+
+    fun openNewsBriefing(topicQuery: String = "") {
+        val cleanTopic = topicQuery.trim()
+        newsFetchJob?.cancel()
+        activeNewsUtteranceId = null
+        tts?.stop()
+        speakingMessageIdFlow.value = null
+        currentMoodFlow.value = JarvisMood.SERIOUS
+        currentTopicTitleFlow.value = if (cleanTopic.isNotBlank()) {
+            "GÜNDEM // ${cleanTopic.uppercase(Locale("tr", "TR"))}"
+        } else {
+            "JARVIS // GÜNDEM"
+        }
+
+        newsBriefingFlow.value = newsBriefingFlow.value.copy(
+            isVisible = true,
+            isLoading = true,
+            topicQuery = cleanTopic,
+            items = emptyList(),
+            currentIndex = 0,
+            isTtsPaused = false,
+            isSpeakingBriefing = false,
+            showingDetail = false,
+            errorMessage = null,
+            lastGestureLabel = "",
+        )
+
+        newsFetchJob = viewModelScope.launch {
+            try {
+                val rawArticles = rssFetcher.fetchCandidateArticles(topicQuery = cleanTopic)
+                if (!newsBriefingFlow.value.isVisible) return@launch
+                if (rawArticles.isEmpty()) {
+                    newsBriefingFlow.value = newsBriefingFlow.value.copy(
+                        isLoading = false,
+                        errorMessage = if (cleanTopic.isNotBlank()) {
+                            "\"$cleanTopic\" ile ilgili güncel haber bulunamadı."
+                        } else {
+                            "Haber kaynaklarına ulaşılamadı. İnternet bağlantını kontrol et."
+                        },
+                    )
+                    return@launch
+                }
+
+                val curatedResult = aiRepository.curateNewsBriefing(
+                    rawArticles = rawArticles,
+                    userContext = uiState.value.preferences.userContext,
+                    topicQuery = cleanTopic,
+                )
+                if (!newsBriefingFlow.value.isVisible) return@launch
+
+                curatedResult.fold(
+                    onSuccess = { items ->
+                        newsBriefingFlow.value = newsBriefingFlow.value.copy(
+                            isLoading = false,
+                            items = items,
+                            currentIndex = 0,
+                            showingDetail = false,
+                            errorMessage = if (items.isEmpty()) {
+                                if (cleanTopic.isNotBlank()) {
+                                    "\"$cleanTopic\" için uygun haber bulunamadı."
+                                } else {
+                                    "Güncel haber bulunamadı."
+                                }
+                            } else {
+                                null
+                            },
+                        )
+                        if (items.isNotEmpty()) {
+                            speakCurrentNewsItem(withIntro = true)
+                        }
+                    },
+                    onFailure = { err ->
+                        newsBriefingFlow.value = newsBriefingFlow.value.copy(
+                            isLoading = false,
+                            errorMessage = err.localizedMessage ?: "Gündem hazırlanamadı.",
+                        )
+                    }
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "openNewsBriefing failed", e)
+                if (newsBriefingFlow.value.isVisible) {
+                    newsBriefingFlow.value = newsBriefingFlow.value.copy(
+                        isLoading = false,
+                        errorMessage = e.localizedMessage ?: "Haberler yüklenirken hata oluştu.",
+                    )
+                }
+            }
+        }
+    }
+
+    fun selectNewsIndex(index: Int, fromGesture: Boolean = false) {
+        val cur = newsBriefingFlow.value
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val safeIndex = index.coerceIn(0, cur.items.lastIndex)
+        if (safeIndex == cur.currentIndex && !fromGesture) return
+
+        newsBriefingFlow.value = cur.copy(
+            currentIndex = safeIndex,
+            showingDetail = false,
+        )
+        if (!cur.isTtsPaused) {
+            speakCurrentNewsItem(withIntro = false)
+        }
+    }
+
+    fun toggleNewsTtsPause() {
+        val cur = newsBriefingFlow.value
+        if (!cur.isVisible) return
+        if (!cur.isTtsPaused) {
+            activeNewsUtteranceId = null
+            tts?.stop()
+            newsBriefingFlow.value = cur.copy(
+                isTtsPaused = true,
+                isSpeakingBriefing = false,
+            )
+        } else {
+            newsBriefingFlow.value = cur.copy(isTtsPaused = false)
+            speakCurrentNewsItem(withIntro = false)
+        }
+    }
+
+    fun toggleNewsDetail(forceDetail: Boolean? = null) {
+        val cur = newsBriefingFlow.value
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val nextDetail = forceDetail ?: !cur.showingDetail
+        if (nextDetail == cur.showingDetail && forceDetail != null) return
+        newsBriefingFlow.value = cur.copy(showingDetail = nextDetail)
+        if (!cur.isTtsPaused) {
+            speakCurrentNewsItem(withIntro = false)
+        }
+    }
+
+    fun handleNewsControl(target: String) {
+        val cur = newsBriefingFlow.value
+        when (target.lowercase(Locale.ROOT)) {
+            "next" -> if (cur.currentIndex < cur.items.lastIndex) {
+                selectNewsIndex(cur.currentIndex + 1)
+            } else {
+                toastFlow.value = "Son haberdesin."
+            }
+            "previous" -> if (cur.currentIndex > 0) {
+                selectNewsIndex(cur.currentIndex - 1)
+            } else {
+                toastFlow.value = "İlk haberdesin."
+            }
+            "detail" -> toggleNewsDetail(forceDetail = true)
+            "pause" -> if (!cur.isTtsPaused) toggleNewsTtsPause()
+            "resume" -> if (cur.isTtsPaused || !cur.isSpeakingBriefing) {
+                newsBriefingFlow.value = cur.copy(isTtsPaused = false)
+                speakCurrentNewsItem(withIntro = false)
+            }
+            "close" -> closeNewsBriefing()
+        }
+    }
+
+    fun closeNewsBriefing() {
+        newsFetchJob?.cancel()
+        gestureBadgeResetJob?.cancel()
+        activeNewsUtteranceId = null
+        tts?.stop()
+        newsBriefingFlow.value = NewsBriefingState()
+        currentMoodFlow.value = JarvisMood.NEUTRAL
+        currentTopicTitleFlow.value = ""
+    }
+
+    fun updateGestureSensorStatus(active: Boolean, statusText: String) {
+        val cur = newsBriefingFlow.value
+        if (cur.isVisible || !active) {
+            newsBriefingFlow.value = cur.copy(
+                gestureSensorActive = active,
+                gestureStatusText = statusText,
+            )
+        }
+    }
+
+    fun onAirGestureDetected(gesture: HandSwipeGesture) {
+        val cur = newsBriefingFlow.value
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val label = when (gesture) {
+            HandSwipeGesture.SWIPE_RIGHT -> {
+                if (cur.currentIndex < cur.items.lastIndex) {
+                    selectNewsIndex(cur.currentIndex + 1, fromGesture = true)
+                }
+                "SAĞA KAYDIRILDI -> SONRAKİ"
+            }
+            HandSwipeGesture.SWIPE_LEFT -> {
+                if (cur.currentIndex > 0) {
+                    selectNewsIndex(cur.currentIndex - 1, fromGesture = true)
+                }
+                "SOLA KAYDIRILDI -> ÖNCEKİ"
+            }
+        }
+        newsBriefingFlow.value = newsBriefingFlow.value.copy(lastGestureLabel = label)
+        gestureBadgeResetJob?.cancel()
+        gestureBadgeResetJob = viewModelScope.launch {
+            delay(1_400L)
+            if (newsBriefingFlow.value.lastGestureLabel == label) {
+                newsBriefingFlow.value = newsBriefingFlow.value.copy(lastGestureLabel = "")
+            }
+        }
+    }
+
+    private fun speakCurrentNewsItem(withIntro: Boolean) {
+        val cur = newsBriefingFlow.value
+        val item = cur.currentItem ?: return
+        if (!ttsReady || cur.isTtsPaused) return
+
+        val body = if (cur.showingDetail) item.detailedSummary else item.briefSummary
+        val speech = if (withIntro && cur.currentIndex == 0 && !cur.showingDetail) {
+            if (cur.topicQuery.isNotBlank()) {
+                "${cur.topicQuery} hakkında güncel haberlere geçiyorum. $body"
+            } else {
+                "Güncel bültene başlıyorum. ${item.category.label}. $body"
+            }
+        } else {
+            body
+        }
+        val utteranceId = "jarvis_news_${cur.currentIndex}_${System.nanoTime()}"
+        activeNewsUtteranceId = utteranceId
+        newsBriefingFlow.value = cur.copy(isSpeakingBriefing = true)
+        tts?.speak(speech, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+    }
+
+    private fun onNewsUtteranceFinished(utteranceId: String) {
+        if (utteranceId != activeNewsUtteranceId) return
+        val cur = newsBriefingFlow.value
+        if (!cur.isVisible || cur.isTtsPaused || cur.items.isEmpty()) {
+            activeNewsUtteranceId = null
+            newsBriefingFlow.value = cur.copy(isSpeakingBriefing = false)
+            return
+        }
+        if (!cur.showingDetail && cur.currentIndex < cur.items.lastIndex) {
+            val nextIdx = cur.currentIndex + 1
+            newsBriefingFlow.value = cur.copy(
+                currentIndex = nextIdx,
+                showingDetail = false,
+            )
+            speakCurrentNewsItem(withIntro = false)
+        } else {
+            activeNewsUtteranceId = null
+            newsBriefingFlow.value = cur.copy(isSpeakingBriefing = false)
         }
     }
 
@@ -821,6 +1526,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             dao.clearMessages()
             currentMoodFlow.value = JarvisMood.NEUTRAL
             currentTopicTitleFlow.value = ""
+            visualCuesFlow.value = emptyList()
             toastFlow.value = "Sohbet geçmişi temizlendi."
         }
     }
@@ -866,10 +1572,42 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         super.onCleared()
+        newsFetchJob?.cancel()
+        gestureBadgeResetJob?.cancel()
+        visualCueResetJob?.cancel()
+        webDownloadAgent.cancelOrDismiss()
         voiceManager.destroy()
         tts?.stop()
         tts?.shutdown()
     }
+
+    private fun ScheduledMessageRuleEntity.toDomain(): ScheduledMessageRuleItem =
+        ScheduledMessageRuleItem(
+            id = id,
+            targetAppPackage = targetAppPackage,
+            targetAppName = targetAppName,
+            recipients = recipientsCsv.split(",").map { it.trim() }.filter { it.isNotBlank() },
+            messageText = messageText,
+            triggerHour = triggerHour,
+            triggerMinute = triggerMinute,
+            repeatDaily = repeatDaily,
+            isEnabled = isEnabled,
+            nextTriggerAtMillis = nextTriggerAtMillis,
+            lastRunAtMillis = lastRunAtMillis,
+            lastStatus = lastStatus,
+            createdAtMillis = createdAtMillis,
+        )
+
+    private fun ScheduledMessageLogEntity.toDomain(): ScheduledMessageLogItem =
+        ScheduledMessageLogItem(
+            id = id,
+            ruleId = ruleId,
+            targetAppName = targetAppName,
+            recipientsSummary = recipientsSummary,
+            status = status,
+            detail = detail,
+            executedAtMillis = executedAtMillis,
+        )
 
     private fun ProactiveAlertEntity.toProactiveDomain(): ProactiveAlertItem {
         return ProactiveAlertItem(

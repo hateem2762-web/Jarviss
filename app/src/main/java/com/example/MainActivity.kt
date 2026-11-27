@@ -72,6 +72,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.accessibility.JarvisAccessibilityService
 import com.example.ai.configureAppCheck
 import com.example.model.JarvisDestination
+import com.example.news.AirGestureController
 import com.example.notifications.JarvisNotificationListenerService
 import com.example.notifications.ProactiveAlertNotifier
 import com.example.overlay.JarvisOverlayService
@@ -162,6 +163,14 @@ fun JarvisApp(
                 ) == PackageManager.PERMISSION_GRANTED
         )
     }
+    var hasCameraPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
 
     LaunchedEffect(openAssistantTabSignal) {
         if (openAssistantTabSignal > 0) {
@@ -181,6 +190,10 @@ fun JarvisApp(
                 hasMicPermission = ContextCompat.checkSelfPermission(
                     context,
                     Manifest.permission.RECORD_AUDIO
+                ) == PackageManager.PERMISSION_GRANTED
+                hasCameraPermission = ContextCompat.checkSelfPermission(
+                    context,
+                    Manifest.permission.CAMERA
                 ) == PackageManager.PERMISSION_GRANTED
                 hasNotificationPermission =
                     Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
@@ -244,6 +257,20 @@ fun JarvisApp(
     ) { granted ->
         hasNotificationPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || granted
         viewModel.syncOverlayServiceIfNeeded()
+    }
+
+    val cameraPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
+        if (granted) {
+            viewModel.setNewsAirGestureEnabled(true)
+        } else {
+            viewModel.setNewsAirGestureEnabled(false)
+            scope.launch {
+                snackbarHostState.showSnackbar(context.getString(R.string.camera_permission_needed))
+            }
+        }
     }
 
     val requestOverlayPermission = {
@@ -317,6 +344,45 @@ fun JarvisApp(
             wakeWordMicLauncher.launch(Manifest.permission.RECORD_AUDIO)
         } else {
             viewModel.setWakeWordEnabled(true)
+        }
+    }
+
+    val toggleNewsAirGesture: (Boolean) -> Unit = { enabled ->
+        if (!enabled) {
+            viewModel.setNewsAirGestureEnabled(false)
+        } else if (!hasCameraPermission) {
+            cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        } else {
+            viewModel.setNewsAirGestureEnabled(true)
+        }
+    }
+
+    val airGestureController = remember(context, viewModel) {
+        AirGestureController(
+            context = context.applicationContext,
+            onSwipe = { gesture -> viewModel.onAirGestureDetected(gesture) },
+            onStatusChanged = { active, statusText ->
+                viewModel.updateGestureSensorStatus(active, statusText)
+            },
+        )
+    }
+
+    val shouldRunAirGesture = currentDestination == JarvisDestination.ASSISTANT &&
+        uiState.newsBriefing.isVisible &&
+        uiState.preferences.newsAirGestureEnabled
+
+    DisposableEffect(shouldRunAirGesture, hasCameraPermission, lifecycleOwner) {
+        if (shouldRunAirGesture) {
+            if (hasCameraPermission) {
+                airGestureController.start(lifecycleOwner)
+            } else {
+                viewModel.updateGestureSensorStatus(false, "Kamera izni gerekli")
+            }
+        } else {
+            airGestureController.stop()
+        }
+        onDispose {
+            airGestureController.stop()
         }
     }
 
@@ -424,6 +490,14 @@ fun JarvisApp(
                                 onContextClick = { currentDestination = JarvisDestination.SETTINGS },
                                 onClearChat = viewModel::clearHistory,
                                 onDismissError = viewModel::dismissError,
+                                onSelectNewsIndex = { index -> viewModel.selectNewsIndex(index) },
+                                onToggleNewsTtsPause = viewModel::toggleNewsTtsPause,
+                                onToggleNewsDetail = { viewModel.toggleNewsDetail() },
+                                onRefreshNews = viewModel::refreshNewsBriefing,
+                                onCloseNews = viewModel::closeNewsBriefing,
+                                onConfirmWebDownload = viewModel::confirmWebDownload,
+                                onOpenWebDownload = viewModel::openCompletedWebDownload,
+                                onDismissWebAgent = viewModel::dismissWebAgent,
                             )
 
                             JarvisDestination.NOTES -> NotesScreen(
@@ -446,13 +520,23 @@ fun JarvisApp(
 
                             JarvisDestination.REMINDERS -> RemindersScreen(
                                 reminders = uiState.reminders,
+                                scheduledRules = uiState.scheduledMessageRules,
+                                scheduledLogs = uiState.scheduledMessageLogs,
+                                isAccessibilityConnected = hasAccessibilityPermission || uiState.isAccessibilityConnected,
+                                installedApps = uiState.installedApps,
                                 canScheduleExactAlarms = hasExactAlarmPermission,
                                 onRequestExactAlarmPermission = {
                                     ReminderScheduler.openExactAlarmSettings(context)
                                 },
+                                onOpenAccessibilitySettings = openAccessibilitySettings,
                                 onToggleComplete = viewModel::toggleReminderComplete,
                                 onDeleteReminder = viewModel::deleteReminder,
                                 onExportTimer = viewModel::exportReminderToSystemTimer,
+                                onSaveScheduledRule = viewModel::saveScheduledMessageRule,
+                                onToggleScheduledRule = viewModel::toggleScheduledMessageRule,
+                                onDeleteScheduledRule = viewModel::deleteScheduledMessageRule,
+                                onRunScheduledRuleNow = viewModel::runScheduledMessageRuleNow,
+                                onClearScheduledLogs = viewModel::clearScheduledMessageLogs,
                             )
 
                             JarvisDestination.SETTINGS -> SettingsScreen(
@@ -461,6 +545,7 @@ fun JarvisApp(
                                 hasMicPermission = hasMicPermission,
                                 hasAccessibilityPermission = hasAccessibilityPermission,
                                 hasNotificationListenerPermission = hasNotificationListenerPermission,
+                                hasCameraPermission = hasCameraPermission,
                                 onRequestOverlayPermission = requestOverlayPermission,
                                 onRequestMicPermission = {
                                     micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
@@ -473,9 +558,15 @@ fun JarvisApp(
                                 onToggleDarkTheme = viewModel::setDarkTheme,
                                 onToggleAutoExecute = viewModel::setAutoExecuteActions,
                                 onToggleSpeakReplies = viewModel::setSpeakReplies,
+                                onToggleMaleVoice = viewModel::setMaleVoiceEnabled,
+                                onSelectTtsVoice = viewModel::setSelectedTtsVoiceName,
+                                onTestVoice = viewModel::testJarvisVoice,
+                                onInstallTtsData = viewModel::openInstallTtsVoices,
                                 onTogglePersistentTrigger = viewModel::setPersistentTriggerEnabled,
                                 onToggleFloatingBubble = toggleFloatingBubble,
                                 onToggleWakeWord = toggleWakeWord,
+                                onToggleNewsAirGesture = toggleNewsAirGesture,
+                                onToggleWebAgentConfirm = viewModel::setWebAgentConfirmBeforeDownload,
                                 onToggleProactiveAlerts = viewModel::setProactiveAlertsEnabled,
                                 onChangeImportanceThreshold = viewModel::setImportanceThreshold,
                                 onDisableAllOverlays = viewModel::disableAllOverlayModes,

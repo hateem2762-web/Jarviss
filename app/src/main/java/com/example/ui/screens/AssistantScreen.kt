@@ -1,6 +1,12 @@
 package com.example.ui.screens
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -78,6 +84,7 @@ import com.example.model.JarvisMessage
 import com.example.model.JarvisMood
 import com.example.model.JarvisVisualState
 import com.example.model.ProactiveAlertItem
+import com.example.news.NewsBriefingStage
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.ui.JarvisUiState
 import com.example.ui.components.JarvisHudHeader
@@ -86,7 +93,9 @@ import com.example.ui.components.LiveSubtitleDisplay
 import com.example.ui.components.MinimalistChatStreamView
 import com.example.ui.components.ParticleNebulaCanvas
 import com.example.ui.components.ProactiveAlertCard
+import com.example.ui.components.VisualCueStage
 import com.example.ui.components.VoiceOrbButton
+import com.example.ui.components.WebAgentCard
 import com.example.ui.components.resolveMoodAccentColor
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCyan
@@ -135,8 +144,20 @@ fun AssistantScreen(
     onContextClick: () -> Unit,
     onClearChat: () -> Unit,
     onDismissError: () -> Unit,
+    onSelectNewsIndex: (Int) -> Unit,
+    onToggleNewsTtsPause: () -> Unit,
+    onToggleNewsDetail: () -> Unit,
+    onRefreshNews: () -> Unit,
+    onCloseNews: () -> Unit,
+    onConfirmWebDownload: () -> Unit,
+    onOpenWebDownload: () -> Unit,
+    onDismissWebAgent: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    BackHandler(enabled = uiState.newsBriefing.isVisible) {
+        onCloseNews()
+    }
+
     var inputText by rememberSaveable { mutableStateOf("") }
     val combinedError = uiState.errorMessage ?: uiState.voiceState.errorMessage
 
@@ -162,6 +183,8 @@ fun AssistantScreen(
         uiState.proactiveAlerts.size,
         latestBotMessage?.id,
         uiState.currentTopicTitle,
+        uiState.webAgentState.isVisible,
+        uiState.webAgentState.headerTitle,
     ) {
         HudTopicResolver.resolveHeader(
             isListening = uiState.voiceState.isListening,
@@ -170,6 +193,7 @@ fun AssistantScreen(
             hasProactiveAlert = uiState.proactiveAlerts.isNotEmpty(),
             latestActionIntent = latestBotMessage?.action?.intent,
             aiTopicTitle = uiState.currentTopicTitle,
+            webAgentHeader = uiState.webAgentState.takeIf { it.isVisible }?.headerTitle.orEmpty(),
         )
     }
 
@@ -343,131 +367,197 @@ fun AssistantScreen(
             }
         }
 
-        // Dynamic HUD Core (Header + Particle Nebula + Live Subtitles)
-        Column(
-            modifier = Modifier
-                .widthIn(max = 720.dp)
-                .fillMaxWidth()
-                .padding(top = 6.dp, bottom = 6.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            JarvisHudHeader(
-                topicHeader = dynamicHeader,
-                visualState = visualState,
-                mood = effectiveMood,
-            )
-
-            val voiceOrbDesc = stringResource(R.string.cd_voice_input)
-            Box(
-                modifier = Modifier
-                    .size(if (uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty()) 210.dp else 168.dp)
-                    .clip(RoundedCornerShape(120.dp))
-                    .semantics { contentDescription = voiceOrbDesc }
-                    .clickable(onClick = onVoiceOrbClick)
-                    .testTag("jarvis_particle_nebula"),
-                contentAlignment = Alignment.Center,
-            ) {
-                ParticleNebulaCanvas(
-                    visualState = visualState,
-                    mood = effectiveMood,
-                    rmsLevel = effectiveRms,
-                    compactMode = false,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-
-            LiveSubtitleDisplay(
-                subtitleText = liveSubtitleText,
-                subtitleKey = liveSubtitleKey,
-                visualState = visualState,
-                mood = effectiveMood,
-                modifier = Modifier.heightIn(min = 38.dp),
-            )
-        }
-
-        // Active Proactive WhatsApp Alerts (if any)
-        if (uiState.proactiveAlerts.isNotEmpty()) {
-            Column(
-                modifier = Modifier
-                    .widthIn(max = 720.dp)
-                    .fillMaxWidth()
-                    .heightIn(max = 210.dp)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 16.dp, vertical = 4.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                uiState.proactiveAlerts.forEach { alert ->
-                    ProactiveAlertCard(
-                        alert = alert,
-                        hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
-                        onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
-                        onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
-                        onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
-                        onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
-                        onDismiss = { onDismissProactiveAlert(alert.id) },
-                    )
-                }
-            }
-        }
-
-        // Translucent Bubble-Free Minimalist Chat Stream (RecyclerView) OR Starter Chips
-        Box(
+        AnimatedContent(
+            targetState = uiState.newsBriefing.isVisible,
             modifier = Modifier
                 .weight(1f)
                 .widthIn(max = 720.dp)
                 .fillMaxWidth(),
-            contentAlignment = Alignment.BottomCenter,
-        ) {
-            if (uiState.messages.isEmpty()) {
-                FlowRow(
+            transitionSpec = {
+                fadeIn(animationSpec = tween(260)) togetherWith fadeOut(animationSpec = tween(200))
+            },
+            label = "assistant_news_stage_transition",
+        ) { inNewsMode ->
+            if (inNewsMode) {
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.Center,
+                    horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
-                    StarterCommands.forEachIndexed { index, item ->
-                        Surface(
-                            shape = RoundedCornerShape(14.dp),
-                            color = MaterialTheme.colorScheme.surface,
-                            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-                            modifier = Modifier
-                                .minimumInteractiveComponentSize()
-                                .clip(RoundedCornerShape(14.dp))
-                                .clickable { onSendCommand(item.command) }
-                                .testTag("quick_command_chip_$index"),
+                    NewsBriefingStage(
+                        state = uiState.newsBriefing,
+                        compactOverlay = false,
+                        onSelectIndex = onSelectNewsIndex,
+                        onTogglePauseTts = onToggleNewsTtsPause,
+                        onToggleDetail = onToggleNewsDetail,
+                        onRefresh = onRefreshNews,
+                        onClose = onCloseNews,
+                    )
+                }
+            } else {
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    // Dynamic HUD Core (Header + Particle Nebula + Live Subtitles)
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 6.dp, bottom = 6.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        JarvisHudHeader(
+                            topicHeader = dynamicHeader,
+                            visualState = visualState,
+                            mood = effectiveMood,
+                        )
+
+                        val voiceOrbDesc = stringResource(R.string.cd_voice_input)
+                        val showVisualCues = uiState.visualCues.isNotEmpty() && !uiState.newsBriefing.isVisible
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            val orbSize = when {
+                                showVisualCues -> 152.dp
+                                uiState.messages.isEmpty() && uiState.proactiveAlerts.isEmpty() -> 210.dp
+                                else -> 168.dp
+                            }
+                            Box(
+                                modifier = Modifier
+                                    .size(orbSize)
+                                    .clip(RoundedCornerShape(120.dp))
+                                    .semantics { contentDescription = voiceOrbDesc }
+                                    .clickable(onClick = onVoiceOrbClick)
+                                    .testTag("jarvis_particle_nebula"),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Icon(
-                                    imageVector = item.icon,
-                                    contentDescription = null,
-                                    tint = accentColor,
-                                    modifier = Modifier.size(16.dp),
+                                ParticleNebulaCanvas(
+                                    visualState = visualState,
+                                    mood = effectiveMood,
+                                    rmsLevel = effectiveRms,
+                                    compactMode = false,
+                                    modifier = Modifier.fillMaxSize(),
                                 )
-                                Text(
-                                    text = item.label,
-                                    style = MaterialTheme.typography.labelLarge,
-                                    color = MaterialTheme.colorScheme.onSurface,
+                            }
+
+                            AnimatedVisibility(visible = showVisualCues) {
+                                VisualCueStage(
+                                    cues = uiState.visualCues,
+                                    accentColor = accentColor,
+                                    isActive = visualState == JarvisVisualState.SPEAKING || uiState.isProcessing,
+                                    compactOverlay = false,
+                                )
+                            }
+                        }
+
+                        LiveSubtitleDisplay(
+                            subtitleText = liveSubtitleText,
+                            subtitleKey = liveSubtitleKey,
+                            visualState = visualState,
+                            mood = effectiveMood,
+                            modifier = Modifier.heightIn(min = 38.dp),
+                        )
+
+                        AnimatedVisibility(visible = uiState.webAgentState.isVisible) {
+                            WebAgentCard(
+                                state = uiState.webAgentState,
+                                onConfirmDownload = onConfirmWebDownload,
+                                onOpenDownloadedFile = onOpenWebDownload,
+                                onDismiss = onDismissWebAgent,
+                                compactOverlay = false,
+                                modifier = Modifier.padding(horizontal = 16.dp),
+                            )
+                        }
+                    }
+
+                    // Active Proactive WhatsApp Alerts (if any)
+                    if (uiState.proactiveAlerts.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 210.dp)
+                                .verticalScroll(rememberScrollState())
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            uiState.proactiveAlerts.forEach { alert ->
+                                ProactiveAlertCard(
+                                    alert = alert,
+                                    hasDirectReply = ProactiveAlertActionCache.hasDirectReply(alert.id),
+                                    onDraftChange = { edited -> onUpdateProactiveDraft(alert.id, edited) },
+                                    onCopyDraft = { draft -> onCopyProactiveDraft(draft) },
+                                    onOpenWhatsApp = { draft -> onOpenProactiveWhatsApp(alert, draft) },
+                                    onSendDirectReply = { draft -> onSendProactiveDirectReply(alert, draft) },
+                                    onDismiss = { onDismissProactiveAlert(alert.id) },
                                 )
                             }
                         }
                     }
+
+                    // Translucent Bubble-Free Minimalist Chat Stream (RecyclerView) OR Starter Chips
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.BottomCenter,
+                    ) {
+                        if (uiState.messages.isEmpty()) {
+                            FlowRow(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 20.dp, vertical = 14.dp),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterHorizontally),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                StarterCommands.forEachIndexed { index, item ->
+                                    Surface(
+                                        shape = RoundedCornerShape(14.dp),
+                                        color = MaterialTheme.colorScheme.surface,
+                                        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                                        modifier = Modifier
+                                            .minimumInteractiveComponentSize()
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .clickable { onSendCommand(item.command) }
+                                            .testTag("quick_command_chip_$index"),
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Icon(
+                                                imageVector = item.icon,
+                                                contentDescription = null,
+                                                tint = accentColor,
+                                                modifier = Modifier.size(16.dp),
+                                            )
+                                            Text(
+                                                text = item.label,
+                                                style = MaterialTheme.typography.labelLarge,
+                                                color = MaterialTheme.colorScheme.onSurface,
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            MinimalistChatStreamView(
+                                messages = uiState.messages,
+                                accentColor = accentColor,
+                                speakingMessageId = uiState.speakingMessageId,
+                                onRunAction = onRunAction,
+                                onCopyMessage = onCopyMessage,
+                                onToggleSpeakMessage = onToggleSpeakMessage,
+                                modifier = Modifier.fillMaxSize(),
+                            )
+                        }
+                    }
                 }
-            } else {
-                MinimalistChatStreamView(
-                    messages = uiState.messages,
-                    accentColor = accentColor,
-                    speakingMessageId = uiState.speakingMessageId,
-                    onRunAction = onRunAction,
-                    onCopyMessage = onCopyMessage,
-                    onToggleSpeakMessage = onToggleSpeakMessage,
-                    modifier = Modifier.fillMaxSize(),
-                )
             }
         }
 

@@ -22,9 +22,13 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -62,6 +66,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.MyLocation
 import androidx.compose.material.icons.rounded.NoteAdd
 import androidx.compose.material3.Button
@@ -126,10 +131,18 @@ import com.example.model.InstalledAppInfo
 import com.example.model.JarvisMood
 import com.example.model.JarvisVisualState
 import com.example.model.ProactiveAlertItem
+import com.example.model.VisualCueItem
+import com.example.model.VisualCueResolver
+import com.example.news.AirGestureController
+import com.example.news.HandSwipeGesture
+import com.example.news.NewsBriefingStage
+import com.example.news.NewsBriefingState
+import com.example.news.RssNewsFetcher
 import com.example.notifications.ProactiveAlertActionCache
 import com.example.notifications.ProactiveAlertNotifier
 import com.example.system.CoordinateMatcher
 import com.example.system.JarvisActionExecutor
+import com.example.system.JarvisTtsVoiceHelper
 import com.example.system.LocalQuickCommandMatcher
 import com.example.system.VoiceInputManager
 import com.example.system.WakeWordManager
@@ -137,6 +150,8 @@ import com.example.ui.components.JarvisHudHeader
 import com.example.ui.components.LiveSubtitleDisplay
 import com.example.ui.components.ParticleNebulaCanvas
 import com.example.ui.components.ProactiveAlertCard
+import com.example.ui.components.VisualCueStage
+import com.example.ui.components.WebAgentCard
 import com.example.ui.components.resolveMoodAccentColor
 import com.example.ui.theme.JarvisAmber
 import com.example.ui.theme.JarvisCrimson
@@ -144,6 +159,8 @@ import com.example.ui.theme.JarvisCyan
 import com.example.ui.theme.JarvisEmerald
 import com.example.ui.theme.JarvisTheme
 import com.example.ui.theme.JetBrainsMonoFontFamily
+import com.example.webagent.WebAgentUiState
+import com.example.webagent.WebDownloadAgent
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -179,6 +196,9 @@ data class OverlayUiState(
     val topicTitle: String = "",
     val lastActionIntent: ActionIntent? = null,
     val recentLines: List<Pair<Boolean, String>> = emptyList(),
+    val newsBriefing: NewsBriefingState = NewsBriefingState(),
+    val webAgentState: WebAgentUiState = WebAgentUiState(),
+    val visualCues: List<VisualCueItem> = emptyList(),
 )
 
 data class CrosshairPositionState(
@@ -201,6 +221,7 @@ class JarvisOverlayService : Service() {
     private lateinit var actionExecutor: JarvisActionExecutor
     private lateinit var voiceManager: VoiceInputManager
     private lateinit var wakeWordManager: WakeWordManager
+    private lateinit var webDownloadAgent: WebDownloadAgent
     private val aiRepository = JarvisRepository()
 
     private val overlayState = MutableStateFlow(OverlayUiState())
@@ -237,7 +258,14 @@ class JarvisOverlayService : Service() {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var voiceConfiguredFromPrefs = false
     private var autoCloseJob: Job? = null
+    private val rssFetcher = RssNewsFetcher()
+    private var airGestureController: AirGestureController? = null
+    private var activeNewsUtteranceId: String? = null
+    private var newsFetchJob: Job? = null
+    private var overlayGestureBadgeJob: Job? = null
+    private var visualCueResetJob: Job? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -248,6 +276,7 @@ class JarvisOverlayService : Service() {
         coordinateStore = CoordinateJsonStore(this, dao)
         actionExecutor = JarvisActionExecutor(this, dao, aiRepository)
         voiceManager = VoiceInputManager(this)
+        webDownloadAgent = WebDownloadAgent(this)
         wakeWordManager = WakeWordManager(this) { trailingCommand ->
             if (Settings.canDrawOverlays(this)) {
                 showExpandedOverlay(autoSubmitQuery = trailingCommand)
@@ -262,7 +291,13 @@ class JarvisOverlayService : Service() {
 
         serviceScope.launch {
             prefsRepo.preferences.collect { prefs ->
+                val voiceChanged = prefs.maleVoiceEnabled != prefsSnapshot.maleVoiceEnabled ||
+                    prefs.selectedTtsVoiceName != prefsSnapshot.selectedTtsVoiceName
                 prefsSnapshot = prefs
+                if (ttsReady && (!voiceConfiguredFromPrefs || voiceChanged)) {
+                    voiceConfiguredFromPrefs = true
+                    JarvisTtsVoiceHelper.configureTurkishVoice(tts, prefs)
+                }
                 wakeWordIndicator.value = prefs.wakeWordEnabled && hasMicPermission()
                 overlayState.value = overlayState.value.copy(
                     ttsEnabled = prefs.speakReplies,
@@ -295,6 +330,12 @@ class JarvisOverlayService : Service() {
                 )
             }
         }
+
+        serviceScope.launch {
+            webDownloadAgent.state.collect { webState ->
+                overlayState.value = overlayState.value.copy(webAgentState = webState)
+            }
+        }
     }
 
     private fun initTextToSpeech() {
@@ -304,6 +345,10 @@ class JarvisOverlayService : Service() {
                     val res = tts?.setLanguage(Locale("tr", "TR"))
                     ttsReady = res != TextToSpeech.LANG_MISSING_DATA &&
                         res != TextToSpeech.LANG_NOT_SUPPORTED
+                    if (ttsReady) {
+                        voiceConfiguredFromPrefs = true
+                        JarvisTtsVoiceHelper.configureTurkishVoice(tts, prefsSnapshot)
+                    }
                     tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                         override fun onStart(utteranceId: String?) {
                             overlayState.value = overlayState.value.copy(isSpeaking = true)
@@ -311,11 +356,35 @@ class JarvisOverlayService : Service() {
 
                         override fun onDone(utteranceId: String?) {
                             overlayState.value = overlayState.value.copy(isSpeaking = false)
+                            if (utteranceId != null && utteranceId.startsWith("jarvis_news_overlay_")) {
+                                serviceScope.launch {
+                                    onOverlayNewsUtteranceFinished(utteranceId)
+                                }
+                            } else {
+                                serviceScope.launch {
+                                    scheduleOverlayVisualCueClear(3_000L)
+                                }
+                            }
                         }
 
                         @Deprecated("Deprecated in Java")
                         override fun onError(utteranceId: String?) {
                             overlayState.value = overlayState.value.copy(isSpeaking = false)
+                            if (utteranceId != null && utteranceId.startsWith("jarvis_news_overlay_")) {
+                                serviceScope.launch {
+                                    if (utteranceId == activeNewsUtteranceId) {
+                                        activeNewsUtteranceId = null
+                                        val curNews = overlayState.value.newsBriefing
+                                        overlayState.value = overlayState.value.copy(
+                                            newsBriefing = curNews.copy(isSpeakingBriefing = false)
+                                        )
+                                    }
+                                }
+                            } else {
+                                serviceScope.launch {
+                                    scheduleOverlayVisualCueClear(2_500L)
+                                }
+                            }
                         }
                     })
                 }
@@ -329,6 +398,13 @@ class JarvisOverlayService : Service() {
         return ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun hasCameraPermission(): Boolean {
+        return ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.CAMERA
         ) == PackageManager.PERMISSION_GRANTED
     }
 
@@ -558,6 +634,7 @@ class JarvisOverlayService : Service() {
             ttsEnabled = prefsSnapshot.speakReplies,
             activeProfileLabel = activeLabel,
             mood = bubbleMoodState.value,
+            webAgentState = webDownloadAgent.state.value,
         )
 
         val lifecycleOwner = OverlayLifecycleOwner().apply { onCreate() }
@@ -606,6 +683,14 @@ class JarvisOverlayService : Service() {
                             collapseOrStopOverlay()
                         },
                         onClose = { minimizeToFloatingBubble() },
+                        onSelectNewsIndex = { idx -> selectOverlayNewsIndex(idx) },
+                        onToggleNewsPauseTts = { toggleOverlayNewsTtsPause() },
+                        onToggleNewsDetail = { toggleOverlayNewsDetail() },
+                        onRefreshNews = { refreshOverlayNewsBriefing() },
+                        onCloseNews = { closeOverlayNewsBriefing() },
+                        onConfirmWebDownload = { confirmOverlayWebDownload() },
+                        onOpenWebDownload = { openCompletedOverlayWebDownload() },
+                        onDismissWebAgent = { dismissOverlayWebAgent() },
                     )
                 }
             }
@@ -668,11 +753,85 @@ class JarvisOverlayService : Service() {
         bubbleView?.let { it.visibility = View.VISIBLE }
     }
 
+    private fun showOverlayVisualCues(
+        aiCues: List<String>,
+        text: String,
+        actionIntent: ActionIntent? = null,
+    ) {
+        val cues = VisualCueResolver.resolveCues(aiCues, text, actionIntent)
+        overlayState.value = overlayState.value.copy(visualCues = cues)
+        if (!overlayState.value.ttsEnabled || !ttsReady) {
+            scheduleOverlayVisualCueClear(11_000L)
+        } else {
+            visualCueResetJob?.cancel()
+        }
+    }
+
+    private fun scheduleOverlayVisualCueClear(delayMs: Long) {
+        visualCueResetJob?.cancel()
+        visualCueResetJob = serviceScope.launch {
+            delay(delayMs)
+            if (!overlayState.value.isSpeaking) {
+                overlayState.value = overlayState.value.copy(visualCues = emptyList())
+            }
+        }
+    }
+
+    private fun triggerOverlayWebAgent(
+        rawTarget: String,
+        confirmBeforeDownload: Boolean,
+    ) {
+        val target = rawTarget.trim()
+        bubbleMoodState.value = JarvisMood.ANALYTICAL
+        showOverlayVisualCues(
+            aiCues = listOf("globe_network", "download_file"),
+            text = target,
+            actionIntent = ActionIntent.WEB_DOWNLOAD_AGENT,
+        )
+        webDownloadAgent.startAutonomousTask(
+            rawRequest = target,
+            confirmBeforeDownload = confirmBeforeDownload,
+        ) { statusMsg, isError ->
+            if (isError) {
+                bubbleMoodState.value = JarvisMood.ALERT
+                overlayState.value = overlayState.value.copy(mood = JarvisMood.ALERT)
+            }
+            if (overlayState.value.ttsEnabled && ttsReady) {
+                tts?.speak(statusMsg, TextToSpeech.QUEUE_FLUSH, null, "jarvis_overlay_web_${System.nanoTime()}")
+            }
+        }
+    }
+
+    private fun confirmOverlayWebDownload() {
+        webDownloadAgent.confirmPendingDownload { statusMsg, isError ->
+            if (isError) {
+                bubbleMoodState.value = JarvisMood.ALERT
+                overlayState.value = overlayState.value.copy(mood = JarvisMood.ALERT)
+            }
+            if (overlayState.value.ttsEnabled && ttsReady) {
+                tts?.speak(statusMsg, TextToSpeech.QUEUE_FLUSH, null, "jarvis_overlay_web_${System.nanoTime()}")
+            }
+        }
+    }
+
+    private fun dismissOverlayWebAgent() {
+        webDownloadAgent.cancelOrDismiss()
+        overlayState.value = overlayState.value.copy(topicTitle = "")
+    }
+
+    private fun openCompletedOverlayWebDownload() {
+        val (_, detail) = webDownloadAgent.openDownloadedFile()
+        if (detail.isNotBlank()) {
+            android.widget.Toast.makeText(this, detail, android.widget.Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun submitQuery(rawText: String) {
         val query = rawText.trim()
         if (query.isEmpty() || overlayState.value.isProcessing) return
 
         autoCloseJob?.cancel()
+        visualCueResetJob?.cancel()
         val updatedWithUser = (overlayState.value.recentLines + (true to query)).takeLast(8)
         overlayState.value = overlayState.value.copy(
             userText = query,
@@ -684,6 +843,7 @@ class JarvisOverlayService : Service() {
             copied = false,
             topicTitle = "",
             lastActionIntent = null,
+            visualCues = emptyList(),
             recentLines = updatedWithUser,
         )
 
@@ -751,9 +911,80 @@ class JarvisOverlayService : Service() {
                     return@launch
                 }
 
-                // 0-TOKEN FAST PATH 2: local hardware controls & screen note capture
-                val localAction = LocalQuickCommandMatcher.match(query)
+                // 0-TOKEN FAST PATH 2: local hardware controls, news controls, & screen note capture
+                val localAction = LocalQuickCommandMatcher.match(
+                    rawPrompt = query,
+                    isNewsModeActive = overlayState.value.newsBriefing.isVisible,
+                )
                 if (localAction != null) {
+                    if (localAction.intent == ActionIntent.OPEN_NEWS_BRIEFING) {
+                        dao.insertMessage(
+                            ChatMessageEntity(
+                                isUser = false,
+                                text = if (localAction.target.isNotBlank()) {
+                                    "\"${localAction.target.trim()}\" ile ilgili güncel haberler hazırlanıyor."
+                                } else {
+                                    "Güncel gündem bülteni hazırlanıyor."
+                                },
+                                intentWire = localAction.intent.wireValue,
+                                target = localAction.target.trim(),
+                                actionStatus = ActionExecutionStatus.EXECUTED.name,
+                                actionStatusDetail = "Haber sunumu açıldı.",
+                                timestampMillis = System.currentTimeMillis(),
+                            )
+                        )
+                        val topic = localAction.target.trim()
+                        bubbleMoodState.value = JarvisMood.SERIOUS
+                        overlayState.value = overlayState.value.copy(
+                            isProcessing = false,
+                            mood = JarvisMood.SERIOUS,
+                            topicTitle = if (topic.isNotBlank()) {
+                                "GÜNDEM // ${topic.uppercase(Locale("tr", "TR"))}"
+                            } else {
+                                "JARVIS // GÜNDEM"
+                            },
+                            lastActionIntent = ActionIntent.OPEN_NEWS_BRIEFING,
+                        )
+                        openOverlayNewsBriefing(topic)
+                        return@launch
+                    }
+                    if (localAction.intent == ActionIntent.NEWS_CONTROL) {
+                        overlayState.value = overlayState.value.copy(isProcessing = false)
+                        handleOverlayNewsControl(localAction.target)
+                        return@launch
+                    }
+                    if (localAction.intent == ActionIntent.WEB_DOWNLOAD_AGENT) {
+                        val targetReq = localAction.target.ifBlank { query }
+                        val replyText = "Web ajanı görevlendirildi: \"$targetReq\""
+                        dao.insertMessage(
+                            ChatMessageEntity(
+                                isUser = false,
+                                text = replyText,
+                                intentWire = localAction.intent.wireValue,
+                                target = targetReq,
+                                actionStatus = ActionExecutionStatus.EXECUTED.name,
+                                actionStatusDetail = "Site taranıyor…",
+                                timestampMillis = System.currentTimeMillis(),
+                            )
+                        )
+                        overlayState.value = overlayState.value.copy(
+                            replyText = replyText,
+                            ttsSummary = replyText,
+                            actionDetail = "Web ajanı taranıyor… (0 token)",
+                            actionFailed = false,
+                            isProcessing = false,
+                            mood = JarvisMood.ANALYTICAL,
+                            topicTitle = "WEB AJANI // İNDİRME",
+                            lastActionIntent = ActionIntent.WEB_DOWNLOAD_AGENT,
+                            recentLines = (overlayState.value.recentLines + (false to replyText)).takeLast(8),
+                        )
+                        triggerOverlayWebAgent(
+                            rawTarget = targetReq,
+                            confirmBeforeDownload = prefs.webAgentConfirmBeforeDownload,
+                        )
+                        return@launch
+                    }
+
                     val execResult = actionExecutor.execute(
                         action = localAction,
                         activeProfilePackage = activePkg,
@@ -787,6 +1018,11 @@ class JarvisOverlayService : Service() {
                         mood = resolvedMood,
                         lastActionIntent = localAction.intent,
                         recentLines = (overlayState.value.recentLines + (false to replyText)).takeLast(8),
+                    )
+                    showOverlayVisualCues(
+                        aiCues = emptyList(),
+                        text = "$query $replyText",
+                        actionIntent = localAction.intent,
                     )
                     if (overlayState.value.ttsEnabled && ttsReady) {
                         tts?.speak(
@@ -843,6 +1079,61 @@ class JarvisOverlayService : Service() {
                         }
                         bubbleMoodState.value = initialMood
 
+                        if (action?.intent == ActionIntent.OPEN_NEWS_BRIEFING) {
+                            val topic = action.target.trim()
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Haber sunumu açıldı.",
+                            )
+                            overlayState.value = overlayState.value.copy(
+                                isProcessing = false,
+                                mood = JarvisMood.SERIOUS,
+                                topicTitle = if (topic.isNotBlank()) {
+                                    "GÜNDEM // ${topic.uppercase(Locale("tr", "TR"))}"
+                                } else {
+                                    "JARVIS // GÜNDEM"
+                                },
+                                lastActionIntent = ActionIntent.OPEN_NEWS_BRIEFING,
+                            )
+                            openOverlayNewsBriefing(topic)
+                            return@fold
+                        }
+                        if (action?.intent == ActionIntent.NEWS_CONTROL) {
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Haber kontrolü uygulandı.",
+                            )
+                            overlayState.value = overlayState.value.copy(isProcessing = false)
+                            handleOverlayNewsControl(action.target)
+                            return@fold
+                        }
+                        if (action?.intent == ActionIntent.WEB_DOWNLOAD_AGENT) {
+                            val targetReq = action.target.ifBlank { query }
+                            dao.updateMessageActionStatus(
+                                id = insertedId,
+                                status = ActionExecutionStatus.EXECUTED.name,
+                                detail = "Web ajanı başlatıldı.",
+                            )
+                            overlayState.value = overlayState.value.copy(
+                                replyText = reply.text,
+                                ttsSummary = reply.ttsSummary,
+                                actionDetail = "Web ajanı başlatıldı.",
+                                actionFailed = false,
+                                isProcessing = false,
+                                mood = JarvisMood.ANALYTICAL,
+                                topicTitle = "WEB AJANI // İNDİRME",
+                                lastActionIntent = ActionIntent.WEB_DOWNLOAD_AGENT,
+                                recentLines = (overlayState.value.recentLines + (false to reply.text)).takeLast(8),
+                            )
+                            triggerOverlayWebAgent(
+                                rawTarget = targetReq,
+                                confirmBeforeDownload = prefs.webAgentConfirmBeforeDownload,
+                            )
+                            return@fold
+                        }
+
                         if (action != null) {
                             val execResult = actionExecutor.execute(
                                 action = action,
@@ -884,6 +1175,11 @@ class JarvisOverlayService : Service() {
                                 lastActionIntent = action.intent,
                                 recentLines = (overlayState.value.recentLines + (false to displayReply)).takeLast(8),
                             )
+                            showOverlayVisualCues(
+                                aiCues = reply.visualCues,
+                                text = "$query $displayReply",
+                                actionIntent = action.intent,
+                            )
 
                             if (overlayState.value.ttsEnabled && ttsReady) {
                                 tts?.speak(
@@ -918,6 +1214,11 @@ class JarvisOverlayService : Service() {
                                 topicTitle = reply.topicTitle,
                                 lastActionIntent = null,
                                 recentLines = (overlayState.value.recentLines + (false to reply.text)).takeLast(8),
+                            )
+                            showOverlayVisualCues(
+                                aiCues = reply.visualCues,
+                                text = "$query ${reply.text}",
+                                actionIntent = null,
                             )
                             if (overlayState.value.ttsEnabled && ttsReady) {
                                 tts?.speak(
@@ -1216,6 +1517,297 @@ class JarvisOverlayService : Service() {
         }
     }
 
+    // ---- OVERLAY NEWS BRIEFING & AIR GESTURE ----
+
+    private fun refreshOverlayNewsBriefing() {
+        openOverlayNewsBriefing(overlayState.value.newsBriefing.topicQuery)
+    }
+
+    private fun openOverlayNewsBriefing(topicQuery: String = "") {
+        val cleanTopic = topicQuery.trim()
+        newsFetchJob?.cancel()
+        activeNewsUtteranceId = null
+        tts?.stop()
+        overlayState.value = overlayState.value.copy(
+            isSpeaking = false,
+            errorText = null,
+            newsBriefing = NewsBriefingState(
+                isVisible = true,
+                isLoading = true,
+                topicQuery = cleanTopic,
+            ),
+        )
+        startOverlayAirGestureIfEnabled()
+
+        newsFetchJob = serviceScope.launch {
+            try {
+                val rawArticles = rssFetcher.fetchCandidateArticles(topicQuery = cleanTopic)
+                if (!overlayState.value.newsBriefing.isVisible) return@launch
+                if (rawArticles.isEmpty()) {
+                    overlayState.value = overlayState.value.copy(
+                        newsBriefing = overlayState.value.newsBriefing.copy(
+                            isLoading = false,
+                            errorMessage = if (cleanTopic.isNotBlank()) {
+                                "\"$cleanTopic\" ile ilgili güncel haber bulunamadı."
+                            } else {
+                                "Haber kaynaklarına ulaşılamadı."
+                            },
+                        )
+                    )
+                    return@launch
+                }
+
+                val curatedResult = aiRepository.curateNewsBriefing(
+                    rawArticles = rawArticles,
+                    userContext = prefsSnapshot.userContext,
+                    topicQuery = cleanTopic,
+                )
+                if (!overlayState.value.newsBriefing.isVisible) return@launch
+
+                curatedResult.fold(
+                    onSuccess = { items ->
+                        overlayState.value = overlayState.value.copy(
+                            newsBriefing = overlayState.value.newsBriefing.copy(
+                                isLoading = false,
+                                items = items,
+                                currentIndex = 0,
+                                showingDetail = false,
+                                errorMessage = if (items.isEmpty()) {
+                                    if (cleanTopic.isNotBlank()) {
+                                        "\"$cleanTopic\" için uygun haber bulunamadı."
+                                    } else {
+                                        "Güncel haber bulunamadı."
+                                    }
+                                } else {
+                                    null
+                                },
+                            )
+                        )
+                        if (items.isNotEmpty()) {
+                            speakCurrentOverlayNewsItem(withIntro = true)
+                        }
+                    },
+                    onFailure = { err ->
+                        overlayState.value = overlayState.value.copy(
+                            newsBriefing = overlayState.value.newsBriefing.copy(
+                                isLoading = false,
+                                errorMessage = err.localizedMessage ?: "Gündem hazırlanamadı.",
+                            )
+                        )
+                    }
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "Overlay news fetch failed", e)
+                if (overlayState.value.newsBriefing.isVisible) {
+                    overlayState.value = overlayState.value.copy(
+                        newsBriefing = overlayState.value.newsBriefing.copy(
+                            isLoading = false,
+                            errorMessage = e.localizedMessage ?: "Haberler yüklenemedi.",
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun selectOverlayNewsIndex(index: Int, fromGesture: Boolean = false) {
+        val cur = overlayState.value.newsBriefing
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val safeIdx = index.coerceIn(0, cur.items.lastIndex)
+        if (safeIdx == cur.currentIndex && !fromGesture) return
+        overlayState.value = overlayState.value.copy(
+            newsBriefing = cur.copy(
+                currentIndex = safeIdx,
+                showingDetail = false,
+            )
+        )
+        if (!cur.isTtsPaused) {
+            speakCurrentOverlayNewsItem(withIntro = false)
+        }
+    }
+
+    private fun toggleOverlayNewsTtsPause() {
+        val cur = overlayState.value.newsBriefing
+        if (!cur.isVisible) return
+        if (!cur.isTtsPaused) {
+            activeNewsUtteranceId = null
+            tts?.stop()
+            overlayState.value = overlayState.value.copy(
+                isSpeaking = false,
+                newsBriefing = cur.copy(
+                    isTtsPaused = true,
+                    isSpeakingBriefing = false,
+                ),
+            )
+        } else {
+            overlayState.value = overlayState.value.copy(
+                newsBriefing = cur.copy(isTtsPaused = false),
+            )
+            speakCurrentOverlayNewsItem(withIntro = false)
+        }
+    }
+
+    private fun toggleOverlayNewsDetail(forceDetail: Boolean? = null) {
+        val cur = overlayState.value.newsBriefing
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val nextDetail = forceDetail ?: !cur.showingDetail
+        if (nextDetail == cur.showingDetail && forceDetail != null) return
+        overlayState.value = overlayState.value.copy(
+            newsBriefing = cur.copy(showingDetail = nextDetail),
+        )
+        if (!cur.isTtsPaused) {
+            speakCurrentOverlayNewsItem(withIntro = false)
+        }
+    }
+
+    private fun handleOverlayNewsControl(target: String) {
+        val cur = overlayState.value.newsBriefing
+        when (target.lowercase(Locale.ROOT)) {
+            "next" -> if (cur.currentIndex < cur.items.lastIndex) selectOverlayNewsIndex(cur.currentIndex + 1)
+            "previous" -> if (cur.currentIndex > 0) selectOverlayNewsIndex(cur.currentIndex - 1)
+            "detail" -> toggleOverlayNewsDetail(forceDetail = true)
+            "pause" -> if (!cur.isTtsPaused) toggleOverlayNewsTtsPause()
+            "resume" -> if (cur.isTtsPaused || !cur.isSpeakingBriefing) {
+                overlayState.value = overlayState.value.copy(
+                    newsBriefing = cur.copy(isTtsPaused = false)
+                )
+                speakCurrentOverlayNewsItem(withIntro = false)
+            }
+            "close" -> closeOverlayNewsBriefing()
+        }
+    }
+
+    private fun closeOverlayNewsBriefing() {
+        stopOverlayNewsResources()
+        bubbleMoodState.value = JarvisMood.NEUTRAL
+        overlayState.value = overlayState.value.copy(
+            mood = JarvisMood.NEUTRAL,
+            topicTitle = "",
+            newsBriefing = NewsBriefingState(),
+        )
+    }
+
+    private fun stopOverlayNewsResources() {
+        newsFetchJob?.cancel()
+        newsFetchJob = null
+        overlayGestureBadgeJob?.cancel()
+        overlayGestureBadgeJob = null
+        if (activeNewsUtteranceId != null) {
+            activeNewsUtteranceId = null
+            tts?.stop()
+        }
+        airGestureController?.stop()
+        airGestureController = null
+    }
+
+    private fun startOverlayAirGestureIfEnabled() {
+        if (!prefsSnapshot.newsAirGestureEnabled) return
+        val owner = overlayLifecycle ?: return
+        if (!hasCameraPermission()) {
+            overlayState.value = overlayState.value.copy(
+                newsBriefing = overlayState.value.newsBriefing.copy(
+                    gestureSensorActive = false,
+                    gestureStatusText = "Kamera izni gerekli",
+                )
+            )
+            return
+        }
+        val controller = airGestureController ?: AirGestureController(
+            context = applicationContext,
+            onSwipe = { gesture -> onOverlayAirGestureDetected(gesture) },
+            onStatusChanged = { active, statusText ->
+                val curNews = overlayState.value.newsBriefing
+                if (curNews.isVisible || !active) {
+                    overlayState.value = overlayState.value.copy(
+                        newsBriefing = curNews.copy(
+                            gestureSensorActive = active,
+                            gestureStatusText = statusText,
+                        )
+                    )
+                }
+            },
+        ).also { airGestureController = it }
+        controller.start(owner)
+    }
+
+    private fun onOverlayAirGestureDetected(gesture: HandSwipeGesture) {
+        val cur = overlayState.value.newsBriefing
+        if (!cur.isVisible || cur.items.isEmpty()) return
+        val label = when (gesture) {
+            HandSwipeGesture.SWIPE_RIGHT -> {
+                if (cur.currentIndex < cur.items.lastIndex) {
+                    selectOverlayNewsIndex(cur.currentIndex + 1, fromGesture = true)
+                }
+                "SAĞA KAYDIRILDI -> SONRAKİ"
+            }
+            HandSwipeGesture.SWIPE_LEFT -> {
+                if (cur.currentIndex > 0) {
+                    selectOverlayNewsIndex(cur.currentIndex - 1, fromGesture = true)
+                }
+                "SOLA KAYDIRILDI -> ÖNCEKİ"
+            }
+        }
+        overlayState.value = overlayState.value.copy(
+            newsBriefing = overlayState.value.newsBriefing.copy(lastGestureLabel = label)
+        )
+        overlayGestureBadgeJob?.cancel()
+        overlayGestureBadgeJob = serviceScope.launch {
+            delay(1_400L)
+            val latest = overlayState.value.newsBriefing
+            if (latest.lastGestureLabel == label) {
+                overlayState.value = overlayState.value.copy(
+                    newsBriefing = latest.copy(lastGestureLabel = "")
+                )
+            }
+        }
+    }
+
+    private fun speakCurrentOverlayNewsItem(withIntro: Boolean) {
+        val cur = overlayState.value.newsBriefing
+        val item = cur.currentItem ?: return
+        if (!ttsReady || cur.isTtsPaused) return
+        val body = if (cur.showingDetail) item.detailedSummary else item.briefSummary
+        val speech = if (withIntro && cur.currentIndex == 0 && !cur.showingDetail) {
+            if (cur.topicQuery.isNotBlank()) {
+                "${cur.topicQuery} hakkında güncel haberlere geçiyorum. $body"
+            } else {
+                "Güncel bültene başlıyorum. ${item.category.label}. $body"
+            }
+        } else {
+            body
+        }
+        val utteranceId = "jarvis_news_overlay_${cur.currentIndex}_${System.nanoTime()}"
+        activeNewsUtteranceId = utteranceId
+        overlayState.value = overlayState.value.copy(
+            newsBriefing = cur.copy(isSpeakingBriefing = true)
+        )
+        tts?.speak(speech, TextToSpeech.QUEUE_FLUSH, null, utteranceId)
+    }
+
+    private fun onOverlayNewsUtteranceFinished(utteranceId: String) {
+        if (utteranceId != activeNewsUtteranceId) return
+        val cur = overlayState.value.newsBriefing
+        if (!cur.isVisible || cur.isTtsPaused || cur.items.isEmpty()) {
+            activeNewsUtteranceId = null
+            overlayState.value = overlayState.value.copy(
+                newsBriefing = cur.copy(isSpeakingBriefing = false)
+            )
+            return
+        }
+        if (!cur.showingDetail && cur.currentIndex < cur.items.lastIndex) {
+            val nextIdx = cur.currentIndex + 1
+            overlayState.value = overlayState.value.copy(
+                newsBriefing = cur.copy(currentIndex = nextIdx, showingDetail = false)
+            )
+            speakCurrentOverlayNewsItem(withIntro = false)
+        } else {
+            activeNewsUtteranceId = null
+            overlayState.value = overlayState.value.copy(
+                newsBriefing = cur.copy(isSpeakingBriefing = false)
+            )
+        }
+    }
+
     private fun disableFloatingBubbleOnly() {
         removeDismissZone()
         removeBubble()
@@ -1231,7 +1823,10 @@ class JarvisOverlayService : Service() {
 
     private fun disableAllOverlayModesCompletely() {
         autoCloseJob?.cancel()
+        visualCueResetJob?.cancel()
         voiceManager.stopListening()
+        stopOverlayNewsResources()
+        webDownloadAgent.cancelOrDismiss()
         wakeWordManager.stop()
         removeAllOverlayWindows()
         serviceScope.launch {
@@ -1243,6 +1838,8 @@ class JarvisOverlayService : Service() {
     private fun minimizeToFloatingBubble() {
         autoCloseJob?.cancel()
         voiceManager.stopListening()
+        stopOverlayNewsResources()
+        tts?.stop()
         removeExpandedOverlay()
 
         if (Settings.canDrawOverlays(this)) {
@@ -1271,6 +1868,7 @@ class JarvisOverlayService : Service() {
     private fun collapseOrStopOverlay() {
         autoCloseJob?.cancel()
         voiceManager.stopListening()
+        stopOverlayNewsResources()
         removeExpandedOverlay()
         if (prefsSnapshot.floatingBubbleEnabled && Settings.canDrawOverlays(this)) {
             showBubble()
@@ -1288,6 +1886,8 @@ class JarvisOverlayService : Service() {
     }
 
     private fun removeExpandedOverlay() {
+        visualCueResetJob?.cancel()
+        stopOverlayNewsResources()
         overlayView?.let { view ->
             try {
                 windowManager.removeView(view)
@@ -1298,6 +1898,11 @@ class JarvisOverlayService : Service() {
         overlayParams = null
         overlayLifecycle?.onDestroy()
         overlayLifecycle = null
+        overlayState.value = overlayState.value.copy(
+            isSpeaking = false,
+            newsBriefing = NewsBriefingState(),
+            visualCues = emptyList(),
+        )
     }
 
     private fun showBubble() {
@@ -1673,6 +2278,9 @@ class JarvisOverlayService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         autoCloseJob?.cancel()
+        visualCueResetJob?.cancel()
+        stopOverlayNewsResources()
+        webDownloadAgent.cancelOrDismiss()
         wakeWordManager.stop()
         voiceManager.destroy()
         tts?.stop()
@@ -1777,6 +2385,14 @@ private fun OverlayCardContent(
     onToggleTts: () -> Unit,
     onOpenFullApp: () -> Unit,
     onClose: () -> Unit,
+    onSelectNewsIndex: (Int) -> Unit,
+    onToggleNewsPauseTts: () -> Unit,
+    onToggleNewsDetail: () -> Unit,
+    onRefreshNews: () -> Unit,
+    onCloseNews: () -> Unit,
+    onConfirmWebDownload: () -> Unit,
+    onOpenWebDownload: () -> Unit,
+    onDismissWebAgent: () -> Unit,
 ) {
     var showTextField by remember { mutableStateOf(false) }
     var draftText by remember { mutableStateOf("") }
@@ -1816,6 +2432,8 @@ private fun OverlayCardContent(
         state.errorText,
         state.lastActionIntent,
         state.topicTitle,
+        state.webAgentState.isVisible,
+        state.webAgentState.headerTitle,
     ) {
         HudTopicResolver.resolveHeader(
             isListening = state.isListening,
@@ -1824,6 +2442,7 @@ private fun OverlayCardContent(
             hasProactiveAlert = false,
             latestActionIntent = state.lastActionIntent,
             aiTopicTitle = state.topicTitle,
+            webAgentHeader = state.webAgentState.takeIf { it.isVisible }?.headerTitle.orEmpty(),
         )
     }
 
@@ -1917,6 +2536,20 @@ private fun OverlayCardContent(
                     }
                 }
 
+                if (state.newsBriefing.isVisible) {
+                    IconButton(
+                        onClick = onMicToggle,
+                        modifier = Modifier.testTag("overlay_news_mic_button"),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.Mic,
+                            contentDescription = stringResource(R.string.cd_voice_input),
+                            tint = if (state.isListening) JarvisAmber else Color(0xFF8B97AA),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
+                }
+
                 IconButton(
                     onClick = { showTextField = !showTextField },
                     modifier = Modifier.testTag("overlay_keyboard_toggle_button"),
@@ -1929,20 +2562,22 @@ private fun OverlayCardContent(
                     )
                 }
 
-                IconButton(
-                    onClick = onToggleTts,
-                    modifier = Modifier.testTag("overlay_tts_toggle_button"),
-                ) {
-                    Icon(
-                        imageVector = if (state.ttsEnabled) {
-                            Icons.AutoMirrored.Rounded.VolumeUp
-                        } else {
-                            Icons.AutoMirrored.Rounded.VolumeOff
-                        },
-                        contentDescription = "Sesli okuma aç veya kapat",
-                        tint = if (state.ttsEnabled) accentColor else Color(0xFF8B97AA),
-                        modifier = Modifier.size(20.dp),
-                    )
+                if (!state.newsBriefing.isVisible) {
+                    IconButton(
+                        onClick = onToggleTts,
+                        modifier = Modifier.testTag("overlay_tts_toggle_button"),
+                    ) {
+                        Icon(
+                            imageVector = if (state.ttsEnabled) {
+                                Icons.AutoMirrored.Rounded.VolumeUp
+                            } else {
+                                Icons.AutoMirrored.Rounded.VolumeOff
+                            },
+                            contentDescription = "Sesli okuma aç veya kapat",
+                            tint = if (state.ttsEnabled) accentColor else Color(0xFF8B97AA),
+                            modifier = Modifier.size(20.dp),
+                        )
+                    }
                 }
 
                 IconButton(
@@ -1958,103 +2593,155 @@ private fun OverlayCardContent(
                 }
             }
 
-            // Contextual HUD Header
-            JarvisHudHeader(
-                topicHeader = dynamicHeader,
-                visualState = visualState,
-                mood = effectiveMood,
-            )
-
-            // Centerpiece Reactive Particle Nebula (tap to start/stop listening)
-            val micToggleDesc = stringResource(R.string.cd_voice_input)
-            Box(
-                modifier = Modifier
-                    .size(134.dp)
-                    .clip(CircleShape)
-                    .testTag("overlay_particle_nebula")
-                    .semantics { contentDescription = micToggleDesc }
-                    .clickable(onClick = onMicToggle),
-                contentAlignment = Alignment.Center,
-            ) {
-                ParticleNebulaCanvas(
-                    visualState = visualState,
-                    mood = effectiveMood,
-                    rmsLevel = effectiveRms,
-                    compactMode = false,
-                    modifier = Modifier.fillMaxSize(),
-                )
-            }
-
-            // Live Typewriter Subtitle Stream
-            LiveSubtitleDisplay(
-                subtitleText = liveSubtitleText,
-                subtitleKey = liveSubtitleKey,
-                visualState = visualState,
-                mood = effectiveMood,
-            )
-
-            if (state.actionDetail.isNotBlank() && state.actionDetail != state.replyText) {
-                Text(
-                    text = state.actionDetail,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (state.actionFailed) JarvisCrimson else JarvisEmerald,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            // Bubble-free translucent chat log with smooth top fade-out mask
-            if (state.recentLines.size > 1) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .heightIn(max = 110.dp),
-                ) {
+            AnimatedContent(
+                targetState = state.newsBriefing.isVisible,
+                modifier = Modifier.fillMaxWidth(),
+                transitionSpec = {
+                    fadeIn(animationSpec = tween(220)) togetherWith fadeOut(animationSpec = tween(180))
+                },
+                label = "overlay_news_mode_transition",
+            ) { inNewsMode ->
+                if (inNewsMode) {
+                    NewsBriefingStage(
+                        state = state.newsBriefing,
+                        compactOverlay = true,
+                        onSelectIndex = onSelectNewsIndex,
+                        onTogglePauseTts = onToggleNewsPauseTts,
+                        onToggleDetail = onToggleNewsDetail,
+                        onRefresh = onRefreshNews,
+                        onClose = onCloseNews,
+                    )
+                } else {
                     Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .verticalScroll(historyScroll)
-                            .padding(top = 14.dp, bottom = 4.dp),
-                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
                     ) {
-                        state.recentLines.forEach { (isUser, text) ->
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        // Contextual HUD Header
+                        JarvisHudHeader(
+                            topicHeader = dynamicHeader,
+                            visualState = visualState,
+                            mood = effectiveMood,
+                        )
+
+                        // Centerpiece Reactive Particle Nebula + Right-Side Live Visual Scene
+                        val micToggleDesc = stringResource(R.string.cd_voice_input)
+                        val showVisualCues = state.visualCues.isNotEmpty()
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(if (showVisualCues) 118.dp else 134.dp)
+                                    .clip(CircleShape)
+                                    .testTag("overlay_particle_nebula")
+                                    .semantics { contentDescription = micToggleDesc }
+                                    .clickable(onClick = onMicToggle),
+                                contentAlignment = Alignment.Center,
                             ) {
-                                Text(
-                                    text = if (isUser) "SEN" else "JARVIS",
-                                    style = MaterialTheme.typography.labelSmall.copy(
-                                        fontFamily = JetBrainsMonoFontFamily,
-                                        fontSize = 10.sp,
-                                    ),
-                                    color = if (isUser) Color(0xFF7D899C) else accentColor,
+                                ParticleNebulaCanvas(
+                                    visualState = visualState,
+                                    mood = effectiveMood,
+                                    rmsLevel = effectiveRms,
+                                    compactMode = false,
+                                    modifier = Modifier.fillMaxSize(),
                                 )
-                                Text(
-                                    text = text,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (isUser) Color(0xFF94A3B8) else Color(0xFFE2E8F0),
-                                    maxLines = 2,
-                                    overflow = TextOverflow.Ellipsis,
-                                    modifier = Modifier.weight(1f),
+                            }
+
+                            AnimatedVisibility(visible = showVisualCues) {
+                                VisualCueStage(
+                                    cues = state.visualCues,
+                                    accentColor = accentColor,
+                                    isActive = visualState == JarvisVisualState.SPEAKING || state.isProcessing,
+                                    compactOverlay = true,
+                                )
+                            }
+                        }
+
+                        // Live Typewriter Subtitle Stream
+                        LiveSubtitleDisplay(
+                            subtitleText = liveSubtitleText,
+                            subtitleKey = liveSubtitleKey,
+                            visualState = visualState,
+                            mood = effectiveMood,
+                        )
+
+                        AnimatedVisibility(visible = state.webAgentState.isVisible) {
+                            WebAgentCard(
+                                state = state.webAgentState,
+                                onConfirmDownload = onConfirmWebDownload,
+                                onOpenDownloadedFile = onOpenWebDownload,
+                                onDismiss = onDismissWebAgent,
+                                compactOverlay = true,
+                            )
+                        }
+
+                        if (state.actionDetail.isNotBlank() && state.actionDetail != state.replyText) {
+                            Text(
+                                text = state.actionDetail,
+                                style = MaterialTheme.typography.labelMedium,
+                                color = if (state.actionFailed) JarvisCrimson else JarvisEmerald,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+
+                        // Bubble-free translucent chat log with smooth top fade-out mask
+                        if (state.recentLines.size > 1) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .heightIn(max = 110.dp),
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .verticalScroll(historyScroll)
+                                        .padding(top = 14.dp, bottom = 4.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    state.recentLines.forEach { (isUser, text) ->
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            Text(
+                                                text = if (isUser) "SEN" else "JARVIS",
+                                                style = MaterialTheme.typography.labelSmall.copy(
+                                                    fontFamily = JetBrainsMonoFontFamily,
+                                                    fontSize = 10.sp,
+                                                ),
+                                                color = if (isUser) Color(0xFF7D899C) else accentColor,
+                                            )
+                                            Text(
+                                                text = text,
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = if (isUser) Color(0xFF94A3B8) else Color(0xFFE2E8F0),
+                                                maxLines = 2,
+                                                overflow = TextOverflow.Ellipsis,
+                                                modifier = Modifier.weight(1f),
+                                            )
+                                        }
+                                    }
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(20.dp)
+                                        .align(Alignment.TopCenter)
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = listOf(
+                                                    Color(0xF5080B10),
+                                                    Color.Transparent,
+                                                )
+                                            )
+                                        ),
                                 )
                             }
                         }
                     }
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(20.dp)
-                            .align(Alignment.TopCenter)
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color(0xF5080B10),
-                                        Color.Transparent,
-                                    )
-                                )
-                            ),
-                    )
                 }
             }
 
@@ -2113,82 +2800,84 @@ private fun OverlayCardContent(
                 }
             }
 
-            // Compact Quick Action Strip
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                OutlinedButton(
-                    onClick = onCaptureScreenNote,
-                    enabled = !state.isProcessing,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
+            // Compact Quick Action Strip (hidden during News View so the briefing stage stays ultra-clean)
+            if (!state.newsBriefing.isVisible) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Icon(
-                        imageVector = Icons.Rounded.NoteAdd,
-                        contentDescription = null,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Ekranı Not Al", style = MaterialTheme.typography.labelSmall)
-                }
-
-                OutlinedButton(
-                    onClick = onRecordPoint,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
-                ) {
-                    Icon(
-                        imageVector = Icons.Rounded.AddLocationAlt,
-                        contentDescription = null,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Nokta", style = MaterialTheme.typography.labelSmall)
-                }
-
-                if (state.replyText.isNotBlank()) {
                     OutlinedButton(
-                        onClick = onCopyReply,
+                        onClick = onCaptureScreenNote,
+                        enabled = !state.isProcessing,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = accentColor),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.NoteAdd,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Ekranı Not Al", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    OutlinedButton(
+                        onClick = onRecordPoint,
                         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                         border = BorderStroke(1.dp, Color(0xFF2B3545)),
                         colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
                     ) {
                         Icon(
-                            imageVector = if (state.copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                            imageVector = Icons.Rounded.AddLocationAlt,
                             contentDescription = null,
                             modifier = Modifier.size(15.dp),
                         )
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = if (state.copied) {
-                                stringResource(R.string.copied_feedback)
-                            } else {
-                                "Kopyala"
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                        )
+                        Text("Nokta", style = MaterialTheme.typography.labelSmall)
                     }
-                }
 
-                OutlinedButton(
-                    onClick = onOpenFullApp,
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                    border = BorderStroke(1.dp, Color(0xFF2B3545)),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF1F5F9)),
-                ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
-                        contentDescription = null,
-                        modifier = Modifier.size(15.dp),
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Uygulama", style = MaterialTheme.typography.labelSmall)
+                    if (state.replyText.isNotBlank()) {
+                        OutlinedButton(
+                            onClick = onCopyReply,
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1)),
+                        ) {
+                            Icon(
+                                imageVector = if (state.copied) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                                contentDescription = null,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = if (state.copied) {
+                                    stringResource(R.string.copied_feedback)
+                                } else {
+                                    "Kopyala"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                            )
+                        }
+                    }
+
+                    OutlinedButton(
+                        onClick = onOpenFullApp,
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                        border = BorderStroke(1.dp, Color(0xFF2B3545)),
+                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFF1F5F9)),
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Rounded.OpenInNew,
+                            contentDescription = null,
+                            modifier = Modifier.size(15.dp),
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text("Uygulama", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
         }

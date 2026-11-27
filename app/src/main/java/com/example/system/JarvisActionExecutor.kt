@@ -10,10 +10,13 @@ import android.provider.AlarmClock
 import android.util.Log
 import com.example.accessibility.JarvisAccessibilityService
 import com.example.ai.JarvisRepository
+import com.example.automation.ScheduledMessageParser
+import com.example.automation.ScheduledMessageScheduler
 import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDao
 import com.example.data.local.NoteJsonStore
 import com.example.data.local.ReminderEntity
+import com.example.data.local.ScheduledMessageRuleEntity
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
 import com.example.model.InstalledAppInfo
@@ -146,6 +149,19 @@ class JarvisActionExecutor(
                 beforeCapture = beforeTap,
                 afterCapture = afterTap,
             )
+            ActionIntent.OPEN_NEWS_BRIEFING -> ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "Gündem bülteni hazırlanıyor."
+            )
+            ActionIntent.NEWS_CONTROL -> ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "Haber kontrolü uygulandı."
+            )
+            ActionIntent.WEB_DOWNLOAD_AGENT -> ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "Web ajanı başlatıldı: ${action.target.ifBlank { "indirme görevi" }}"
+            )
+            ActionIntent.SCHEDULE_MESSAGE -> executeScheduleMessage(action)
             ActionIntent.NONE -> ActionExecutionResult(
                 status = ActionExecutionStatus.EXECUTED,
                 detail = ""
@@ -430,6 +446,88 @@ class JarvisActionExecutor(
                 detail = "Hatırlatıcı kaydedilemedi."
             )
         }
+    }
+
+    private suspend fun executeScheduleMessage(action: JarvisAction): ActionExecutionResult {
+        val rawTarget = action.target.trim()
+        val apps = getInstalledLauncherApps()
+
+        var appName = ""
+        var appPackage = ""
+        var recipients = emptyList<String>()
+        var hour = 23
+        var minute = 0
+        var repeatDaily = true
+        var messageText = action.message.trim().ifBlank { "." }
+
+        if (rawTarget.contains("|")) {
+            val parts = rawTarget.split("|")
+            appName = parts.getOrNull(0).orEmpty().trim()
+            appPackage = parts.getOrNull(1).orEmpty().trim()
+            recipients = parts.getOrNull(2).orEmpty().split(",").map { it.trim() }.filter { it.isNotBlank() }
+            val hm = parts.getOrNull(3).orEmpty().split(":")
+            hour = hm.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 23
+            minute = hm.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: 0
+            repeatDaily = parts.getOrNull(4)?.toBooleanStrictOrNull() ?: true
+        } else if (rawTarget.contains(":")) {
+            // Gemini format: "<app>:<recipient1,recipient2>:<HH:MM>"
+            val parts = rawTarget.split(":", limit = 3)
+            val appHint = parts.getOrNull(0).orEmpty().trim()
+            val resolved = ScheduledMessageParser.resolveKnownAppPackage(appHint, apps)
+            appName = resolved?.first ?: appHint.ifBlank { "TikTok" }
+            appPackage = resolved?.second ?: findBestAppMatch(appName, apps)?.packageName ?: "com.zhiliaoapp.musically"
+            recipients = parts.getOrNull(1).orEmpty().split(",").map { it.trim() }.filter { it.isNotBlank() }
+            val timeParts = parts.getOrNull(2).orEmpty().split(":", ".")
+            hour = timeParts.getOrNull(0)?.toIntOrNull()?.coerceIn(0, 23) ?: 23
+            minute = timeParts.getOrNull(1)?.toIntOrNull()?.coerceIn(0, 59) ?: 0
+        } else {
+            val parsed = ScheduledMessageParser.parse(rawTarget, apps)
+            if (parsed != null) {
+                appName = parsed.appName
+                appPackage = parsed.appPackage
+                recipients = parsed.recipients
+                hour = parsed.hour
+                minute = parsed.minute
+                repeatDaily = parsed.repeatDaily
+                if (action.message.isBlank()) {
+                    messageText = parsed.messageText
+                }
+            }
+        }
+
+        if (recipients.isEmpty() || appPackage.isBlank()) {
+            return ActionExecutionResult(
+                status = ActionExecutionStatus.FAILED,
+                detail = "Zamanlı mesaj için uygulama, saat ve en az bir alıcı adı belirtilmeli (Alarmlar sekmesinden de ekleyebilirsin)."
+            )
+        }
+
+        val triggerAt = ScheduledMessageScheduler.computeNextTriggerMillis(hour, minute)
+        val timeFormatted = String.format(Locale.ROOT, "%02d:%02d", hour, minute)
+        val ruleId = dao.insertScheduledRule(
+            ScheduledMessageRuleEntity(
+                targetAppPackage = appPackage,
+                targetAppName = appName,
+                recipientsCsv = recipients.joinToString(", "),
+                messageText = messageText,
+                triggerHour = hour,
+                triggerMinute = minute,
+                repeatDaily = repeatDaily,
+                isEnabled = true,
+                nextTriggerAtMillis = triggerAt,
+                lastStatus = "Zamanlandı ($timeFormatted)",
+            )
+        )
+        ScheduledMessageScheduler.scheduleRule(context, ruleId, triggerAt)
+        val a11yHint = if (JarvisAccessibilityService.getInstance() == null) {
+            " (Not: Otomatik gönderim için Erişilebilirlik Servisini açık tut.)"
+        } else {
+            ""
+        }
+        return ActionExecutionResult(
+            status = ActionExecutionStatus.EXECUTED,
+            detail = "Zamanlı mesaj kuruldu: $timeFormatted · $appName -> ${recipients.joinToString(", ")} (\"$messageText\")$a11yHint"
+        )
     }
 
     private fun executeGoHome(): ActionExecutionResult {

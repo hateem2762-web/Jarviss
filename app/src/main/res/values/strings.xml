@@ -48,4 +48,11 @@
     <string name="proactive_channel_name">JARVIS Önemli WhatsApp Uyarıları</string>
     <string name="proactive_channel_desc">Önem eşiğini aşan WhatsApp mesajları için özet, gerekçe ve hazır cevap taslağı bildirimleri</string>
     <string name="notification_listener_needed">Gelen WhatsApp mesajlarını analiz etmek için Bildirim Erişimi izni gerekli.</string>
+    <string name="camera_permission_needed">Haber modunda el hareketi kontrolü için kamera izni gerekli.</string>
+    <string name="news_hud_label">JARVIS // GÜNDEM</string>
+    <string name="news_previous">Önceki haber</string>
+    <string name="news_next">Sonraki haber</string>
+    <string name="news_detail">Detaylandır</string>
+    <string name="news_return_chat">Sohbete dön</string>
+    <string name="news_pause_tts">Sesli okumayı duraklat veya devam ettir</string>
 </resources>

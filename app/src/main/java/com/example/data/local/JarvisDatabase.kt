@@ -79,6 +79,34 @@ data class NoteEntity(
     val updatedAtMillis: Long = System.currentTimeMillis(),
 )
 
+@Entity(tableName = "scheduled_message_rules")
+data class ScheduledMessageRuleEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val targetAppPackage: String,
+    val targetAppName: String,
+    val recipientsCsv: String,
+    val messageText: String,
+    val triggerHour: Int,
+    val triggerMinute: Int,
+    val repeatDaily: Boolean = true,
+    val isEnabled: Boolean = true,
+    val nextTriggerAtMillis: Long,
+    val lastRunAtMillis: Long? = null,
+    val lastStatus: String = "Zamanlandı",
+    val createdAtMillis: Long = System.currentTimeMillis(),
+)
+
+@Entity(tableName = "scheduled_message_logs")
+data class ScheduledMessageLogEntity(
+    @PrimaryKey(autoGenerate = true) val id: Long = 0,
+    val ruleId: Long,
+    val targetAppName: String,
+    val recipientsSummary: String,
+    val status: String,
+    val detail: String,
+    val executedAtMillis: Long = System.currentTimeMillis(),
+)
+
 @Dao
 interface JarvisDao {
     @Query("SELECT * FROM chat_messages ORDER BY timestampMillis ASC, id ASC")
@@ -160,6 +188,58 @@ interface JarvisDao {
 
     @Query("DELETE FROM notes WHERE id = :id")
     suspend fun deleteNote(id: Long)
+
+    @Query("SELECT * FROM scheduled_message_rules ORDER BY isEnabled DESC, triggerHour ASC, triggerMinute ASC, id DESC")
+    fun observeScheduledRules(): Flow<List<ScheduledMessageRuleEntity>>
+
+    @Query("SELECT * FROM scheduled_message_rules ORDER BY triggerHour ASC, triggerMinute ASC")
+    suspend fun getAllScheduledRules(): List<ScheduledMessageRuleEntity>
+
+    @Query("SELECT * FROM scheduled_message_rules WHERE id = :id LIMIT 1")
+    suspend fun getScheduledRuleById(id: Long): ScheduledMessageRuleEntity?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertScheduledRule(entity: ScheduledMessageRuleEntity): Long
+
+    @Query(
+        "UPDATE scheduled_message_rules SET targetAppPackage = :targetAppPackage, targetAppName = :targetAppName, recipientsCsv = :recipientsCsv, messageText = :messageText, triggerHour = :triggerHour, triggerMinute = :triggerMinute, repeatDaily = :repeatDaily, isEnabled = :isEnabled, nextTriggerAtMillis = :nextTriggerAtMillis WHERE id = :id"
+    )
+    suspend fun updateScheduledRule(
+        id: Long,
+        targetAppPackage: String,
+        targetAppName: String,
+        recipientsCsv: String,
+        messageText: String,
+        triggerHour: Int,
+        triggerMinute: Int,
+        repeatDaily: Boolean,
+        isEnabled: Boolean,
+        nextTriggerAtMillis: Long,
+    )
+
+    @Query("UPDATE scheduled_message_rules SET isEnabled = :enabled, nextTriggerAtMillis = :nextTriggerAtMillis WHERE id = :id")
+    suspend fun setScheduledRuleEnabled(id: Long, enabled: Boolean, nextTriggerAtMillis: Long)
+
+    @Query("UPDATE scheduled_message_rules SET lastRunAtMillis = :lastRunAtMillis, lastStatus = :lastStatus, isEnabled = :isEnabled, nextTriggerAtMillis = :nextTriggerAtMillis WHERE id = :id")
+    suspend fun updateScheduledRuleStatus(
+        id: Long,
+        lastRunAtMillis: Long,
+        lastStatus: String,
+        isEnabled: Boolean,
+        nextTriggerAtMillis: Long,
+    )
+
+    @Query("DELETE FROM scheduled_message_rules WHERE id = :id")
+    suspend fun deleteScheduledRule(id: Long)
+
+    @Query("SELECT * FROM scheduled_message_logs ORDER BY executedAtMillis DESC LIMIT 30")
+    fun observeScheduledLogs(): Flow<List<ScheduledMessageLogEntity>>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertScheduledLog(entity: ScheduledMessageLogEntity): Long
+
+    @Query("DELETE FROM scheduled_message_logs")
+    suspend fun clearScheduledLogs()
 }
 
 @Database(
@@ -169,8 +249,10 @@ interface JarvisDao {
         TapCoordinateEntity::class,
         ProactiveAlertEntity::class,
         NoteEntity::class,
+        ScheduledMessageRuleEntity::class,
+        ScheduledMessageLogEntity::class,
     ],
-    version = 5,
+    version = 6,
     exportSchema = false,
 )
 abstract class JarvisDatabase : RoomDatabase() {
