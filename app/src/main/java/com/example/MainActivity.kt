@@ -273,6 +273,20 @@ fun JarvisApp(
         }
     }
 
+    val globalGestureCameraLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCameraPermission = granted
+        if (granted) {
+            viewModel.setGlobalAirGestureEnabled(true)
+        } else {
+            viewModel.setGlobalAirGestureEnabled(false)
+            scope.launch {
+                snackbarHostState.showSnackbar("Uzaktan el kontrolü için ön kamera izni gerekli.")
+            }
+        }
+    }
+
     val requestOverlayPermission = {
         val intent = Intent(
             Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -357,6 +371,21 @@ fun JarvisApp(
         }
     }
 
+    val toggleGlobalAirGesture: (Boolean) -> Unit = { enabled ->
+        if (!enabled) {
+            viewModel.setGlobalAirGestureEnabled(false)
+        } else if (!hasCameraPermission) {
+            globalGestureCameraLauncher.launch(Manifest.permission.CAMERA)
+        } else {
+            viewModel.setGlobalAirGestureEnabled(true)
+            if (!Settings.canDrawOverlays(context)) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Mini el kontrolü HUD'ı için Üstte Göster izni önerilir.")
+                }
+            }
+        }
+    }
+
     val airGestureController = remember(context, viewModel) {
         AirGestureController(
             context = context.applicationContext,
@@ -371,6 +400,10 @@ fun JarvisApp(
         uiState.newsBriefing.isVisible &&
         uiState.preferences.newsAirGestureEnabled
 
+    LaunchedEffect(shouldRunAirGesture) {
+        viewModel.setNewsModeCameraBusy(shouldRunAirGesture)
+    }
+
     DisposableEffect(shouldRunAirGesture, hasCameraPermission, lifecycleOwner) {
         if (shouldRunAirGesture) {
             if (hasCameraPermission) {
@@ -383,6 +416,7 @@ fun JarvisApp(
         }
         onDispose {
             airGestureController.stop()
+            viewModel.setNewsModeCameraBusy(false)
         }
     }
 
@@ -390,6 +424,7 @@ fun JarvisApp(
         uiState.preferences.persistentTriggerEnabled ||
         uiState.preferences.floatingBubbleEnabled ||
         uiState.preferences.wakeWordEnabled ||
+        uiState.preferences.globalAirGestureEnabled ||
         (uiState.preferences.proactiveAlertsEnabled && hasNotificationListenerPermission)
 
     LaunchedEffect(needsServiceOrReminders, hasNotificationPermission) {
@@ -566,6 +601,9 @@ fun JarvisApp(
                                 onToggleFloatingBubble = toggleFloatingBubble,
                                 onToggleWakeWord = toggleWakeWord,
                                 onToggleNewsAirGesture = toggleNewsAirGesture,
+                                onToggleGlobalAirGesture = toggleGlobalAirGesture,
+                                onSelectGlobalAirGestureScope = viewModel::setGlobalAirGestureScope,
+                                onSelectGlobalAirGestureHorizontal = viewModel::setGlobalAirGestureHorizontalAction,
                                 onToggleWebAgentConfirm = viewModel::setWebAgentConfirmBeforeDownload,
                                 onToggleProactiveAlerts = viewModel::setProactiveAlertsEnabled,
                                 onChangeImportanceThreshold = viewModel::setImportanceThreshold,

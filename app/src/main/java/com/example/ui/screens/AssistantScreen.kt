@@ -173,6 +173,7 @@ fun AssistantScreen(
     }
     val effectiveMood = when {
         combinedError != null -> JarvisMood.ALERT
+        uiState.globalAirGestureState.lastActionLabel.isNotBlank() -> JarvisMood.ENERGETIC
         uiState.proactiveAlerts.isNotEmpty() && latestBotMessage == null -> JarvisMood.SERIOUS
         else -> uiState.currentMood
     }
@@ -213,10 +214,20 @@ fun AssistantScreen(
         }
     }
 
+    var gesturePulseRms by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(uiState.globalAirGestureState.triggerCount) {
+        if (uiState.globalAirGestureState.triggerCount > 0L) {
+            gesturePulseRms = 0.58f
+            delay(450L)
+            gesturePulseRms = 0f
+        }
+    }
+
     val effectiveRms = when {
         uiState.voiceState.isListening -> uiState.voiceState.rmsLevel
         uiState.speakingMessageId != null -> ttsCadenceRms
         uiState.isProcessing -> 0.18f
+        gesturePulseRms > 0f -> gesturePulseRms
         else -> 0f
     }
 

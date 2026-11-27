@@ -22,6 +22,9 @@ object LocalQuickCommandMatcher {
         // 0.6 Autonomous Web Browsing & File / APK Download ("... sitesine gir şunu indir", "... APK indir")
         matchWebDownloadCommand(rawPrompt, norm)?.let { return it }
 
+        // 0.7 Global Air Gesture Camera Scroll Control ("el kontrolünü kapat/aç", "el hareketiyle kaydırmayı durdur")
+        matchGlobalAirGestureCommand(norm)?.let { return it }
+
         // 1. Natural language News / Briefing triggers (general or topic-specific)
         matchNewsRequest(rawPrompt = rawPrompt, norm = norm)?.let { return it }
 
@@ -116,6 +119,42 @@ object LocalQuickCommandMatcher {
         return JarvisAction(
             intent = ActionIntent.WEB_DOWNLOAD_AGENT,
             target = cleanedTarget,
+        )
+    }
+
+    private fun matchGlobalAirGestureCommand(norm: String): JarvisAction? {
+        val trimmed = norm
+            .removePrefix("hey jarvis ")
+            .removePrefix("jarvis ")
+            .trim()
+        val hasAirGestureCue = trimmed.contains("el kontrol") ||
+            trimmed.contains("el hareket") ||
+            trimmed.contains("uzaktan el") ||
+            trimmed.contains("air gesture") ||
+            (trimmed.contains("elle") && (trimmed.contains("kaydir") || trimmed.contains("kontrol")))
+        if (!hasAirGestureCue) return null
+
+        val wantsOff = trimmed.contains("kapat") ||
+            trimmed.contains("kapa") ||
+            trimmed.contains("durdur") ||
+            trimmed.contains("devre disi") ||
+            trimmed.contains("iptal")
+        val wantsOn = trimmed.contains("ac") ||
+            trimmed.contains("baslat") ||
+            trimmed.contains("etkinlestir") ||
+            trimmed.contains("aktif")
+
+        if (!wantsOff && !wantsOn) return null
+
+        val target = when {
+            wantsOff -> "off"
+            trimmed.contains("tiktok") || trimmed.contains("video") || trimmed.contains("reels") || trimmed.contains("shorts") -> "on_video"
+            trimmed.contains("tum uygulama") || trimmed.contains("her yerde") -> "on_all"
+            else -> "on"
+        }
+        return JarvisAction(
+            intent = ActionIntent.AIR_GESTURE_CONTROL,
+            target = target,
         )
     }
 

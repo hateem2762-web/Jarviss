@@ -1,5 +1,6 @@
 package com.example.system
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -8,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.AlarmClock
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.example.accessibility.JarvisAccessibilityService
 import com.example.ai.JarvisRepository
 import com.example.automation.ScheduledMessageParser
@@ -17,11 +19,14 @@ import com.example.data.local.JarvisDao
 import com.example.data.local.NoteJsonStore
 import com.example.data.local.ReminderEntity
 import com.example.data.local.ScheduledMessageRuleEntity
+import com.example.data.preferences.UserPreferencesRepository
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
+import com.example.model.AirGestureScope
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
 import com.example.model.TapCoordinateItem
+import com.example.overlay.JarvisOverlayService
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -42,6 +47,7 @@ class JarvisActionExecutor(
     private val coordinateStore = CoordinateJsonStore(context, dao)
     private val noteStore = NoteJsonStore(context, dao)
     private val deviceControl = DeviceControlManager(context)
+    private val prefsRepo = UserPreferencesRepository(context)
 
     suspend fun getInstalledLauncherApps(): List<InstalledAppInfo> = withContext(Dispatchers.IO) {
         val pm = context.packageManager
@@ -162,6 +168,7 @@ class JarvisActionExecutor(
                 detail = "Web ajanı başlatıldı: ${action.target.ifBlank { "indirme görevi" }}"
             )
             ActionIntent.SCHEDULE_MESSAGE -> executeScheduleMessage(action)
+            ActionIntent.AIR_GESTURE_CONTROL -> executeAirGestureControl(action.target)
             ActionIntent.NONE -> ActionExecutionResult(
                 status = ActionExecutionStatus.EXECUTED,
                 detail = ""
@@ -527,6 +534,51 @@ class JarvisActionExecutor(
         return ActionExecutionResult(
             status = ActionExecutionStatus.EXECUTED,
             detail = "Zamanlı mesaj kuruldu: $timeFormatted · $appName -> ${recipients.joinToString(", ")} (\"$messageText\")$a11yHint"
+        )
+    }
+
+    private suspend fun executeAirGestureControl(rawTarget: String): ActionExecutionResult {
+        val target = rawTarget.trim().lowercase(Locale.ROOT)
+        if (target == "off") {
+            prefsRepo.setGlobalAirGestureEnabled(false)
+            JarvisOverlayService.syncMode(context)
+            return ActionExecutionResult(
+                status = ActionExecutionStatus.EXECUTED,
+                detail = "Uzaktan el hareketi kontrolü kapatıldı; kamera serbest bırakıldı."
+            )
+        }
+
+        val hasCamera = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.CAMERA
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!hasCamera) {
+            return ActionExecutionResult(
+                status = ActionExecutionStatus.FAILED,
+                detail = "Uzaktan el kontrolü için Kamera izni gerekli. Ayarlar'dan izin verip açabilirsin."
+            )
+        }
+
+        when (target) {
+            "on_video" -> prefsRepo.setGlobalAirGestureScope(AirGestureScope.VIDEO_FEEDS_ONLY)
+            "on_all" -> prefsRepo.setGlobalAirGestureScope(AirGestureScope.ALL_APPS)
+        }
+        prefsRepo.setGlobalAirGestureEnabled(true)
+        JarvisOverlayService.syncMode(context)
+
+        val a11yHint = if (JarvisAccessibilityService.getInstance() == null) {
+            " (Kaydırma için Erişilebilirlik Servisini açık tut.)"
+        } else {
+            ""
+        }
+        val scopeLabel = when (target) {
+            "on_video" -> " (Sadece TikTok / Video Akışları)"
+            "on_all" -> " (Tüm Uygulamalar)"
+            else -> ""
+        }
+        return ActionExecutionResult(
+            status = ActionExecutionStatus.EXECUTED,
+            detail = "Uzaktan el hareketi kontrolü açıldı$scopeLabel.$a11yHint"
         )
     }
 

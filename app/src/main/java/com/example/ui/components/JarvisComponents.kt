@@ -39,6 +39,7 @@ import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.FlashlightOn
 import androidx.compose.material.icons.rounded.Home
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.PanTool
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.PlayCircle
 import androidx.compose.material.icons.rounded.Public
@@ -470,5 +471,6 @@ private fun ActionIntent.icon(): ImageVector = when (this) {
     ActionIntent.NEWS_CONTROL -> Icons.Rounded.TouchApp
     ActionIntent.WEB_DOWNLOAD_AGENT -> Icons.Rounded.CloudDownload
     ActionIntent.SCHEDULE_MESSAGE -> Icons.Rounded.ScheduleSend
+    ActionIntent.AIR_GESTURE_CONTROL -> Icons.Rounded.PanTool
     ActionIntent.NONE -> Icons.Rounded.Code
 }

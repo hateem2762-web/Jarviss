@@ -8,6 +8,8 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.example.model.AirGestureHorizontalAction
+import com.example.model.AirGestureScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
@@ -31,6 +33,9 @@ data class JarvisPreferences(
     val maleVoiceEnabled: Boolean = true,
     val selectedTtsVoiceName: String = "",
     val webAgentConfirmBeforeDownload: Boolean = true,
+    val globalAirGestureEnabled: Boolean = false,
+    val globalAirGestureScope: AirGestureScope = AirGestureScope.ALL_APPS,
+    val globalAirGestureHorizontalAction: AirGestureHorizontalAction = AirGestureHorizontalAction.SWIPE,
 )
 
 class UserPreferencesRepository(private val context: Context) {
@@ -51,6 +56,9 @@ class UserPreferencesRepository(private val context: Context) {
         val MALE_VOICE_ENABLED = booleanPreferencesKey("male_voice_enabled")
         val SELECTED_TTS_VOICE = stringPreferencesKey("selected_tts_voice_name")
         val WEB_AGENT_CONFIRM_DOWNLOAD = booleanPreferencesKey("web_agent_confirm_download")
+        val GLOBAL_AIR_GESTURE_ENABLED = booleanPreferencesKey("global_air_gesture_enabled")
+        val GLOBAL_AIR_GESTURE_SCOPE = stringPreferencesKey("global_air_gesture_scope")
+        val GLOBAL_AIR_GESTURE_HORIZONTAL = stringPreferencesKey("global_air_gesture_horizontal")
     }
 
     val preferences: Flow<JarvisPreferences> = context.jarvisDataStore.data.map { prefs ->
@@ -70,6 +78,11 @@ class UserPreferencesRepository(private val context: Context) {
             maleVoiceEnabled = prefs[Keys.MALE_VOICE_ENABLED] ?: true,
             selectedTtsVoiceName = prefs[Keys.SELECTED_TTS_VOICE] ?: "",
             webAgentConfirmBeforeDownload = prefs[Keys.WEB_AGENT_CONFIRM_DOWNLOAD] ?: true,
+            globalAirGestureEnabled = prefs[Keys.GLOBAL_AIR_GESTURE_ENABLED] ?: false,
+            globalAirGestureScope = AirGestureScope.fromWire(prefs[Keys.GLOBAL_AIR_GESTURE_SCOPE]),
+            globalAirGestureHorizontalAction = AirGestureHorizontalAction.fromWire(
+                prefs[Keys.GLOBAL_AIR_GESTURE_HORIZONTAL]
+            ),
         )
     }
 
@@ -163,6 +176,24 @@ class UserPreferencesRepository(private val context: Context) {
     suspend fun setWebAgentConfirmBeforeDownload(enabled: Boolean) {
         context.jarvisDataStore.edit { prefs ->
             prefs[Keys.WEB_AGENT_CONFIRM_DOWNLOAD] = enabled
+        }
+    }
+
+    suspend fun setGlobalAirGestureEnabled(enabled: Boolean) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.GLOBAL_AIR_GESTURE_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setGlobalAirGestureScope(scope: AirGestureScope) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.GLOBAL_AIR_GESTURE_SCOPE] = scope.wireValue
+        }
+    }
+
+    suspend fun setGlobalAirGestureHorizontalAction(action: AirGestureHorizontalAction) {
+        context.jarvisDataStore.edit { prefs ->
+            prefs[Keys.GLOBAL_AIR_GESTURE_HORIZONTAL] = action.wireValue
         }
     }
 }

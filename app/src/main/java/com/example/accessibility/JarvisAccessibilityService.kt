@@ -45,6 +45,13 @@ data class ScheduledAutomationReport(
     val failedRecipients: List<String>,
 )
 
+enum class SwipeDirection {
+    NEXT_UP,
+    PREV_DOWN,
+    LEFT,
+    RIGHT,
+}
+
 class JarvisAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
@@ -283,6 +290,83 @@ class JarvisAccessibilityService : AccessibilityService() {
                 continuation.resume(false)
             }
         }
+    }
+
+    /**
+     * Dispatches a realistic touch fling/scroll via AccessibilityService.dispatchGesture.
+     * NEXT_UP swipes finger bottom -> top (advances TikTok / Reels / Shorts to next video).
+     * PREV_DOWN swipes finger top -> bottom (returns to previous video / scrolls up).
+     */
+    suspend fun dispatchSwipe(direction: SwipeDirection): Boolean = withContext(Dispatchers.Main) {
+        val (screenW, screenH) = getRealScreenSize(this@JarvisAccessibilityService)
+        val w = screenW.toFloat()
+        val h = screenH.toFloat()
+
+        val coords = when (direction) {
+            SwipeDirection.NEXT_UP -> floatArrayOf(
+                w * 0.50f, h * 0.78f,
+                w * 0.51f, h * 0.49f,
+                w * 0.50f, h * 0.21f,
+                300f,
+            )
+            SwipeDirection.PREV_DOWN -> floatArrayOf(
+                w * 0.50f, h * 0.23f,
+                w * 0.49f, h * 0.52f,
+                w * 0.50f, h * 0.80f,
+                320f,
+            )
+            SwipeDirection.LEFT -> floatArrayOf(
+                w * 0.84f, h * 0.50f,
+                w * 0.50f, h * 0.49f,
+                w * 0.16f, h * 0.50f,
+                280f,
+            )
+            SwipeDirection.RIGHT -> floatArrayOf(
+                w * 0.16f, h * 0.50f,
+                w * 0.50f, h * 0.51f,
+                w * 0.84f, h * 0.50f,
+                280f,
+            )
+        }
+        val startX = coords[0]
+        val startY = coords[1]
+        val midX = coords[2]
+        val midY = coords[3]
+        val endX = coords[4]
+        val endY = coords[5]
+        val durationMs = coords[6].toLong()
+
+        val path = Path().apply {
+            moveTo(startX, startY)
+            quadTo(midX, midY, endX, endY)
+        }
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
+        val gesture = GestureDescription.Builder()
+            .addStroke(stroke)
+            .build()
+
+        suspendCancellableCoroutine { continuation ->
+            val accepted = dispatchGesture(
+                gesture,
+                object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (continuation.isActive) continuation.resume(true)
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (continuation.isActive) continuation.resume(false)
+                    }
+                },
+                null,
+            )
+            if (!accepted && continuation.isActive) {
+                continuation.resume(false)
+            }
+        }
+    }
+
+    fun dispatchBackAction(): Boolean {
+        return performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
     suspend fun executeScheduledMessageAutomation(
@@ -635,6 +719,26 @@ class JarvisAccessibilityService : AccessibilityService() {
             }
             context.startActivity(intent)
         }
+
+        fun isVideoFeedPackage(packageName: String?): Boolean {
+            val pkg = packageName?.trim()?.lowercase(Locale.ROOT).orEmpty()
+            if (pkg.isBlank()) return false
+            if (pkg in VIDEO_FEED_PACKAGES) return true
+            return pkg.contains("tiktok") ||
+                pkg.contains("musically") ||
+                pkg.contains("youtube") ||
+                pkg.contains("instagram")
+        }
+
+        private val VIDEO_FEED_PACKAGES = setOf(
+            "com.zhiliaoapp.musically",
+            "com.zhiliaoapp.musically.go",
+            "com.ss.android.ugc.trill",
+            "com.instagram.android",
+            "com.google.android.youtube",
+            "com.facebook.katana",
+            "com.snapchat.android",
+        )
 
         fun getRealScreenSize(context: Context): Pair<Int, Int> {
             val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.NotificationsActive
+import androidx.compose.material.icons.rounded.PanTool
 import androidx.compose.material.icons.rounded.PictureInPictureAlt
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Tune
@@ -61,6 +62,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.example.R
+import com.example.model.AirGestureHorizontalAction
+import com.example.model.AirGestureScope
 import com.example.ui.JarvisUiState
 import com.example.ui.components.AppCheckSettingsCard
 
@@ -98,6 +101,9 @@ fun SettingsScreen(
     onToggleFloatingBubble: (Boolean) -> Unit,
     onToggleWakeWord: (Boolean) -> Unit,
     onToggleNewsAirGesture: (Boolean) -> Unit,
+    onToggleGlobalAirGesture: (Boolean) -> Unit,
+    onSelectGlobalAirGestureScope: (AirGestureScope) -> Unit,
+    onSelectGlobalAirGestureHorizontal: (AirGestureHorizontalAction) -> Unit,
     onToggleWebAgentConfirm: (Boolean) -> Unit,
     onToggleProactiveAlerts: (Boolean) -> Unit,
     onChangeImportanceThreshold: (Int) -> Unit,
@@ -334,6 +340,170 @@ fun SettingsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text("Nokta Kaydet", style = MaterialTheme.typography.labelMedium)
+                        }
+                    }
+                }
+            }
+
+            // Global Air Gesture Phone & Feed Control Card
+            Surface(
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surface,
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                tonalElevation = 0.dp,
+            ) {
+                val a11yReady = hasAccessibilityPermission || uiState.isAccessibilityConnected
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PanTool,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                        Text(
+                            text = "Uzaktan El Hareketiyle Telefon Kontrolü",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+
+                    Text(
+                        text = "Ön kameradan el hareketlerini takip ederek ekrana dokunmadan TikTok, Reels, Shorts ve diğer uygulamalarda yukarı/aşağı kaydırma yapar. Kapalıyken kamera hemen serbest bırakılır.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    SettingToggleRow(
+                        title = "Uzaktan El Hareketiyle Telefon Kontrolü (Kamera)",
+                        subtitle = when {
+                            uiState.preferences.globalAirGestureEnabled && !hasCameraPermission ->
+                                "Kamera izni gerekiyor"
+                            uiState.preferences.globalAirGestureEnabled && !a11yReady ->
+                                "Açık • Kaydırma için Erişilebilirlik Servisi gerekli"
+                            uiState.preferences.globalAirGestureEnabled ->
+                                "Aktif • ${uiState.globalAirGestureState.statusLabel}"
+                            else ->
+                                "Kapalı • Pil tasarrufu için kamera serbest"
+                        },
+                        checked = uiState.preferences.globalAirGestureEnabled,
+                        onCheckedChange = onToggleGlobalAirGesture,
+                        testTag = "toggle_global_air_gesture",
+                    )
+
+                    if (!a11yReady) {
+                        OutlinedButton(
+                            onClick = onOpenAccessibilitySettings,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .minimumInteractiveComponentSize()
+                                .testTag("global_air_gesture_accessibility_button"),
+                            shape = RoundedCornerShape(12.dp),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.AccessibilityNew,
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("Kaydırma İçin Erişilebilirlik Servisini Aç")
+                        }
+                    }
+
+                    Text(
+                        text = "Çalışma Kapsamı",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AirGestureScope.entries.forEach { scopeOption ->
+                            val selected = uiState.preferences.globalAirGestureScope == scopeOption
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSelectGlobalAirGestureScope(scopeOption) }
+                                    .testTag("global_air_scope_${scopeOption.wireValue}"),
+                            ) {
+                                Text(
+                                    text = scopeOption.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                )
+                            }
+                        }
+                    }
+
+                    Text(
+                        text = "Sağ / Sol El Hareketi Eylemi",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        AirGestureHorizontalAction.entries.forEach { actionOption ->
+                            val selected = uiState.preferences.globalAirGestureHorizontalAction == actionOption
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (selected) {
+                                    MaterialTheme.colorScheme.primaryContainer
+                                } else {
+                                    MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f)
+                                },
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (selected) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.outlineVariant
+                                    }
+                                ),
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .clickable { onSelectGlobalAirGestureHorizontal(actionOption) }
+                                    .testTag("global_air_horiz_${actionOption.wireValue}"),
+                            ) {
+                                Text(
+                                    text = actionOption.label,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (selected) {
+                                        MaterialTheme.colorScheme.onPrimaryContainer
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurface
+                                    },
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                                )
+                            }
                         }
                     }
                 }

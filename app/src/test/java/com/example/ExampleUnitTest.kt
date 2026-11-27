@@ -1,6 +1,9 @@
 package com.example
 
+import com.example.accessibility.JarvisAccessibilityService
 import com.example.automation.ScheduledMessageParser
+import com.example.gesture.GlobalAirGestureDirection
+import com.example.gesture.GlobalAirGestureTracker
 import com.example.model.ActionIntent
 import com.example.model.HudTopicResolver
 import com.example.model.JarvisAction
@@ -616,5 +619,76 @@ class ExampleUnitTest {
             extension = "apk",
         )
         assertTrue(untrustedRequiresConfirm)
+    }
+
+    @Test
+    fun global_air_gesture_tracker_detects_4_directions_and_enforces_cooldown_and_presence() {
+        val tracker = GlobalAirGestureTracker(cooldownMs = 1_100L)
+
+        // Hand enters frame -> tracked
+        val f1 = tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.75f, timestampMs = 1_000L)
+        assertTrue(f1.isHandTracked)
+        assertNull(f1.gesture)
+
+        // Hand moves UP (y decreases) -> SWIPE_UP
+        tracker.onFrame(hasHand = true, userSpaceX = 0.51f, y = 0.62f, timestampMs = 1_120L)
+        val up = tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.50f, timestampMs = 1_240L)
+        assertEquals(GlobalAirGestureDirection.SWIPE_UP, up.gesture)
+        assertTrue(up.isHandTracked)
+
+        // Within 1.1s cooldown -> suppressed
+        tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.30f, timestampMs = 1_500L)
+        tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.48f, timestampMs = 1_620L)
+        val suppressed = tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.70f, timestampMs = 1_740L)
+        assertNull(suppressed.gesture)
+
+        // After 1.1s cooldown -> SWIPE_DOWN (y increases)
+        tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.32f, timestampMs = 2_450L)
+        tracker.onFrame(hasHand = true, userSpaceX = 0.51f, y = 0.45f, timestampMs = 2_560L)
+        val down = tracker.onFrame(hasHand = true, userSpaceX = 0.50f, y = 0.58f, timestampMs = 2_680L)
+        assertEquals(GlobalAirGestureDirection.SWIPE_DOWN, down.gesture)
+
+        // After cooldown -> SWIPE_RIGHT
+        tracker.onFrame(hasHand = true, userSpaceX = 0.25f, y = 0.50f, timestampMs = 3_900L)
+        tracker.onFrame(hasHand = true, userSpaceX = 0.40f, y = 0.51f, timestampMs = 4_020L)
+        val right = tracker.onFrame(hasHand = true, userSpaceX = 0.56f, y = 0.50f, timestampMs = 4_140L)
+        assertEquals(GlobalAirGestureDirection.SWIPE_RIGHT, right.gesture)
+
+        // After cooldown -> SWIPE_LEFT
+        tracker.onFrame(hasHand = true, userSpaceX = 0.75f, y = 0.50f, timestampMs = 5_400L)
+        tracker.onFrame(hasHand = true, userSpaceX = 0.58f, y = 0.50f, timestampMs = 5_520L)
+        val left = tracker.onFrame(hasHand = true, userSpaceX = 0.42f, y = 0.51f, timestampMs = 5_640L)
+        assertEquals(GlobalAirGestureDirection.SWIPE_LEFT, left.gesture)
+
+        // Hand disappears -> holds for <700ms, then expires
+        val briefDrop = tracker.onFrame(hasHand = false, userSpaceX = 0f, y = 0f, timestampMs = 5_900L)
+        assertTrue(briefDrop.isHandTracked)
+        val expiredDrop = tracker.onFrame(hasHand = false, userSpaceX = 0f, y = 0f, timestampMs = 6_400L)
+        assertFalse(expiredDrop.isHandTracked)
+    }
+
+    @Test
+    fun global_air_gesture_voice_commands_and_video_package_filter_work() {
+        val offCmd = LocalQuickCommandMatcher.match("Jarvis, el kontrolünü kapat")
+        assertEquals(ActionIntent.AIR_GESTURE_CONTROL, offCmd?.intent)
+        assertEquals("off", offCmd?.target)
+
+        val stopCmd = LocalQuickCommandMatcher.match("El hareketiyle kaydırmayı durdur")
+        assertEquals(ActionIntent.AIR_GESTURE_CONTROL, stopCmd?.intent)
+        assertEquals("off", stopCmd?.target)
+
+        val onCmd = LocalQuickCommandMatcher.match("El kontrolünü aç")
+        assertEquals(ActionIntent.AIR_GESTURE_CONTROL, onCmd?.intent)
+        assertEquals("on", onCmd?.target)
+
+        val videoCmd = LocalQuickCommandMatcher.match("Sadece TikTok'ta el kontrolünü aç")
+        assertEquals(ActionIntent.AIR_GESTURE_CONTROL, videoCmd?.intent)
+        assertEquals("on_video", videoCmd?.target)
+
+        assertTrue(JarvisAccessibilityService.isVideoFeedPackage("com.zhiliaoapp.musically"))
+        assertTrue(JarvisAccessibilityService.isVideoFeedPackage("com.instagram.android"))
+        assertTrue(JarvisAccessibilityService.isVideoFeedPackage("com.google.android.youtube"))
+        assertFalse(JarvisAccessibilityService.isVideoFeedPackage("com.whatsapp"))
+        assertFalse(JarvisAccessibilityService.isVideoFeedPackage("com.android.settings"))
     }
 }

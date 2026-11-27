@@ -138,6 +138,8 @@ object VisualCueResolver {
                     VisualCueItem("rocket_launch", "KOMUT // BAŞLAT")
                 ActionIntent.OPEN_NEWS_BRIEFING, ActionIntent.NEWS_CONTROL ->
                     VisualCueItem("globe_network", "GÜNDEM // YAYIN")
+                ActionIntent.AIR_GESTURE_CONTROL ->
+                    VisualCueItem("brain_spark", "EL KONTROLÜ // KAMERA")
                 ActionIntent.NONE -> null
             }
             if (fallback != null) {

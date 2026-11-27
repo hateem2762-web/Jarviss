@@ -26,6 +26,7 @@ enum class ActionIntent(val wireValue: String, val displayLabel: String) {
     NEWS_CONTROL("news_control", "Haber Kontrolü"),
     WEB_DOWNLOAD_AGENT("web_download_agent", "Web İndirme Ajanı"),
     SCHEDULE_MESSAGE("schedule_message", "Zamanlı Mesaj"),
+    AIR_GESTURE_CONTROL("air_gesture_control", "El Kontrolü"),
     NONE("none", "Yanıt");
 
     companion object {
@@ -215,6 +216,30 @@ enum class JarvisVisualState {
     ERROR,
 }
 
+enum class AirGestureScope(val wireValue: String, val label: String) {
+    ALL_APPS("all_apps", "Tüm Uygulamalar"),
+    VIDEO_FEEDS_ONLY("video_feeds", "Sadece TikTok / Video Akışları");
+
+    companion object {
+        fun fromWire(value: String?): AirGestureScope {
+            val clean = value?.trim()?.lowercase().orEmpty()
+            return entries.firstOrNull { it.wireValue == clean } ?: ALL_APPS
+        }
+    }
+}
+
+enum class AirGestureHorizontalAction(val wireValue: String, val label: String) {
+    SWIPE("swipe", "Yatay Kaydırma (Sağ / Sol)"),
+    BACK_NEXT("back_next", "Geri Git (Sol) / Sağa Kaydır");
+
+    companion object {
+        fun fromWire(value: String?): AirGestureHorizontalAction {
+            val clean = value?.trim()?.lowercase().orEmpty()
+            return entries.firstOrNull { it.wireValue == clean } ?: SWIPE
+        }
+    }
+}
+
 object HudTopicResolver {
     fun resolveHeader(
         isListening: Boolean,
@@ -236,6 +261,7 @@ object HudTopicResolver {
             latestActionIntent == ActionIntent.SET_REMINDER -> "ZAMANLAYICI // HATIRLATMA"
             latestActionIntent == ActionIntent.SCHEDULE_MESSAGE -> "OTOMASYON // ZAMANLI MESAJ"
             latestActionIntent == ActionIntent.WEB_DOWNLOAD_AGENT -> "WEB AJANI // İNDİRME"
+            latestActionIntent == ActionIntent.AIR_GESTURE_CONTROL -> "EL KONTROLÜ // KAMERA"
             latestActionIntent == ActionIntent.OPEN_NEWS_BRIEFING ||
                 latestActionIntent == ActionIntent.NEWS_CONTROL -> "JARVIS // GÜNDEM"
             latestActionIntent in setOf(
@@ -262,7 +288,8 @@ object HudTopicResolver {
             ActionIntent.WEB_DOWNLOAD_AGENT -> JarvisMood.ANALYTICAL
             ActionIntent.TAP_COORDINATE,
             ActionIntent.TORCH_CONTROL,
-            ActionIntent.SEARCH_YOUTUBE -> JarvisMood.ENERGETIC
+            ActionIntent.SEARCH_YOUTUBE,
+            ActionIntent.AIR_GESTURE_CONTROL -> JarvisMood.ENERGETIC
             ActionIntent.SET_REMINDER,
             ActionIntent.SCHEDULE_MESSAGE,
             ActionIntent.OPEN_SYSTEM_SETTINGS,

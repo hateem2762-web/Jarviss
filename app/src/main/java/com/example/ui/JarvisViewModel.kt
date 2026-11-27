@@ -31,8 +31,11 @@ import com.example.data.local.TapCoordinateEntity
 import com.example.data.local.toDomain
 import com.example.data.preferences.JarvisPreferences
 import com.example.data.preferences.UserPreferencesRepository
+import com.example.gesture.GlobalAirGestureHudState
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
+import com.example.model.AirGestureHorizontalAction
+import com.example.model.AirGestureScope
 import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisAction
@@ -102,6 +105,7 @@ data class JarvisUiState(
     val ttsVoiceInfo: AppliedVoiceInfo = AppliedVoiceInfo(),
     val webAgentState: WebAgentUiState = WebAgentUiState(),
     val visualCues: List<VisualCueItem> = emptyList(),
+    val globalAirGestureState: GlobalAirGestureHudState = GlobalAirGestureHudState(),
 )
 
 class JarvisViewModel(application: Application) : AndroidViewModel(application) {
@@ -175,6 +179,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         val voiceInfo: AppliedVoiceInfo,
         val visualCues: List<VisualCueItem>,
         val webAgentState: WebAgentUiState,
+        val globalAirGestureState: GlobalAirGestureHudState,
     )
 
     private val extrasPersistentFlow: Flow<ExtrasPersistentSnapshot> = combine(
@@ -244,14 +249,17 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
         currentTopicTitleFlow,
         ttsVoiceInfoFlow,
         visualCuesFlow,
-        webDownloadAgent.state,
-    ) { mood, topic, voiceInfo, cues, webState ->
+        combine(webDownloadAgent.state, JarvisOverlayService.globalAirGestureHudState) { webState, airState ->
+            webState to airState
+        },
+    ) { mood, topic, voiceInfo, cues, (webState, airState) ->
         HudVisualSnapshot(
             mood = mood,
             topicTitle = topic,
             voiceInfo = voiceInfo,
             visualCues = cues,
             webAgentState = webState,
+            globalAirGestureState = airState,
         )
     }
 
@@ -311,6 +319,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
             ttsVoiceInfo = hudMeta.voiceInfo,
             webAgentState = hudMeta.webAgentState,
             visualCues = hudMeta.visualCues,
+            globalAirGestureState = hudMeta.globalAirGestureState,
         )
     }.stateIn(
         scope = viewModelScope,
@@ -658,7 +667,8 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                                 action.intent == ActionIntent.TORCH_CONTROL ||
                                 action.intent == ActionIntent.VOLUME_CONTROL ||
                                 action.intent == ActionIntent.CAPTURE_SCREEN_NOTE ||
-                                action.intent == ActionIntent.SCHEDULE_MESSAGE
+                                action.intent == ActionIntent.SCHEDULE_MESSAGE ||
+                                action.intent == ActionIntent.AIR_GESTURE_CONTROL
                             ) {
                                 if (execResult.detail.isNotBlank()) {
                                     spokenText = execResult.detail
@@ -1175,6 +1185,7 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
     fun disableAllOverlayModes() {
         viewModelScope.launch {
             prefsRepo.disableAllOverlayModes()
+            prefsRepo.setGlobalAirGestureEnabled(false)
             JarvisOverlayService.disableAll(getApplication())
             toastFlow.value = "Kayan baloncuk ve hızlı servis kapatıldı."
         }
@@ -1182,7 +1193,12 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
 
     fun syncOverlayServiceIfNeeded() {
         val prefs = uiState.value.preferences
-        if (prefs.persistentTriggerEnabled || prefs.floatingBubbleEnabled || prefs.wakeWordEnabled) {
+        if (
+            prefs.persistentTriggerEnabled ||
+            prefs.floatingBubbleEnabled ||
+            prefs.wakeWordEnabled ||
+            prefs.globalAirGestureEnabled
+        ) {
             JarvisOverlayService.syncMode(getApplication())
         }
     }
@@ -1207,6 +1223,47 @@ class JarvisViewModel(application: Application) : AndroidViewModel(application) 
                 "Haber modunda el hareketi kontrolü kapatıldı."
             }
         }
+    }
+
+    fun setGlobalAirGestureEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            prefsRepo.setGlobalAirGestureEnabled(enabled)
+            val current = uiState.value.preferences
+            if (
+                enabled ||
+                current.persistentTriggerEnabled ||
+                current.floatingBubbleEnabled ||
+                current.wakeWordEnabled
+            ) {
+                JarvisOverlayService.syncMode(getApplication())
+            } else {
+                JarvisOverlayService.disableAll(getApplication())
+            }
+            toastFlow.value = if (enabled) {
+                "Uzaktan el hareketi kontrolü açıldı."
+            } else {
+                "Uzaktan el hareketi kontrolü kapatıldı; kamera serbest bırakıldı."
+            }
+        }
+    }
+
+    fun setGlobalAirGestureScope(scope: AirGestureScope) {
+        viewModelScope.launch {
+            prefsRepo.setGlobalAirGestureScope(scope)
+            if (uiState.value.preferences.globalAirGestureEnabled) {
+                JarvisOverlayService.syncMode(getApplication())
+            }
+        }
+    }
+
+    fun setGlobalAirGestureHorizontalAction(action: AirGestureHorizontalAction) {
+        viewModelScope.launch {
+            prefsRepo.setGlobalAirGestureHorizontalAction(action)
+        }
+    }
+
+    fun setNewsModeCameraBusy(busy: Boolean) {
+        JarvisOverlayService.setNewsModeCameraBusy(busy)
     }
 
     // ---- News Briefing & Air Gesture Controls ----

@@ -117,6 +117,7 @@ import androidx.savedstate.setViewTreeSavedStateRegistryOwner
 import com.example.MainActivity
 import com.example.R
 import com.example.accessibility.JarvisAccessibilityService
+import com.example.accessibility.SwipeDirection
 import com.example.ai.JarvisRepository
 import com.example.ai.configureAppCheck
 import com.example.data.local.ChatMessageEntity
@@ -124,8 +125,13 @@ import com.example.data.local.CoordinateJsonStore
 import com.example.data.local.JarvisDatabase
 import com.example.data.preferences.JarvisPreferences
 import com.example.data.preferences.UserPreferencesRepository
+import com.example.gesture.GlobalAirGestureController
+import com.example.gesture.GlobalAirGestureDirection
+import com.example.gesture.GlobalAirGestureHudState
 import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
+import com.example.model.AirGestureHorizontalAction
+import com.example.model.AirGestureScope
 import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisMood
@@ -146,6 +152,7 @@ import com.example.system.JarvisTtsVoiceHelper
 import com.example.system.LocalQuickCommandMatcher
 import com.example.system.VoiceInputManager
 import com.example.system.WakeWordManager
+import com.example.ui.components.GlobalAirGestureHudPill
 import com.example.ui.components.JarvisHudHeader
 import com.example.ui.components.LiveSubtitleDisplay
 import com.example.ui.components.ParticleNebulaCanvas
@@ -172,6 +179,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -199,6 +209,7 @@ data class OverlayUiState(
     val newsBriefing: NewsBriefingState = NewsBriefingState(),
     val webAgentState: WebAgentUiState = WebAgentUiState(),
     val visualCues: List<VisualCueItem> = emptyList(),
+    val globalAirGestureState: GlobalAirGestureHudState = GlobalAirGestureHudState(),
 )
 
 data class CrosshairPositionState(
@@ -255,6 +266,13 @@ class JarvisOverlayService : Service() {
 
     private var proactiveAlertView: ComposeView? = null
     private var proactiveAlertLifecycle: OverlayLifecycleOwner? = null
+
+    private var airGestureHudView: ComposeView? = null
+    private var airGestureHudLifecycle: OverlayLifecycleOwner? = null
+    private var globalCameraLifecycle: OverlayLifecycleOwner? = null
+    private var globalAirGestureController: GlobalAirGestureController? = null
+    private var globalGestureFlashJob: Job? = null
+    private var globalMoodResetJob: Job? = null
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -334,6 +352,47 @@ class JarvisOverlayService : Service() {
         serviceScope.launch {
             webDownloadAgent.state.collect { webState ->
                 overlayState.value = overlayState.value.copy(webAgentState = webState)
+            }
+        }
+
+        globalAirGestureController = GlobalAirGestureController(
+            context = applicationContext,
+            onGesture = { dir -> handleGlobalAirGesture(dir) },
+            onTrackingChanged = { cameraActive, handTracked, errorStatus ->
+                val cur = _globalAirGestureHudState.value
+                val nextLabel = when {
+                    errorStatus != null -> errorStatus
+                    !cameraActive && cur.isWaitingForVideoApp -> "VİDEO BEKLENİYOR"
+                    !cameraActive -> "EL KONTROLÜ // BEKLEMEDE"
+                    handTracked -> "HAND TRACKED // READY"
+                    else -> "AIR GESTURE // HAZIR"
+                }
+                val updated = cur.copy(
+                    isCameraActive = cameraActive,
+                    isHandTracked = handTracked,
+                    statusLabel = nextLabel,
+                )
+                _globalAirGestureHudState.value = updated
+                overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
+            },
+        )
+
+        serviceScope.launch {
+            combine(
+                prefsRepo.preferences,
+                JarvisAccessibilityService.currentForegroundPackage,
+                JarvisAccessibilityService.isServiceConnected,
+                isNewsModeOwningCamera,
+                overlayState,
+            ) { prefs, fgPkg, _, newsOwnsCameraInApp, ovState ->
+                val overlayNewsCameraActive = ovState.newsBriefing.isVisible && prefs.newsAirGestureEnabled
+                Triple(prefs, fgPkg, newsOwnsCameraInApp || overlayNewsCameraActive)
+            }.collect { (prefs, fgPkg, newsOwnsCamera) ->
+                syncGlobalAirGestureState(
+                    prefs = prefs,
+                    foregroundPackage = fgPkg,
+                    newsOwnsCamera = newsOwnsCamera,
+                )
             }
         }
     }
@@ -467,6 +526,7 @@ class JarvisOverlayService : Service() {
                         !prefs.persistentTriggerEnabled &&
                         !prefs.floatingBubbleEnabled &&
                         !prefs.wakeWordEnabled &&
+                        !prefs.globalAirGestureEnabled &&
                         overlayView == null &&
                         crosshairReticleView == null
                     ) {
@@ -538,10 +598,15 @@ class JarvisOverlayService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val contentSummary = if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
-            "\"Jarvis\" sesli uyandırma aktif • Konuş veya nokta kaydet"
-        } else {
-            "Konuş veya ekrandan dokunma noktası kaydet"
+        val contentSummary = when {
+            prefsSnapshot.globalAirGestureEnabled && hasCameraPermission() &&
+                prefsSnapshot.wakeWordEnabled && hasMicPermission() ->
+                "\"Jarvis\" dinleme ve Uzaktan El Kontrolü aktif"
+            prefsSnapshot.globalAirGestureEnabled && hasCameraPermission() ->
+                "Uzaktan El Hareketiyle Kontrol aktif • Dokun veya el salla"
+            prefsSnapshot.wakeWordEnabled && hasMicPermission() ->
+                "\"Jarvis\" sesli uyandırma aktif • Konuş veya nokta kaydet"
+            else -> "Konuş veya ekrandan dokunma noktası kaydet"
         }
 
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
@@ -571,11 +636,12 @@ class JarvisOverlayService : Service() {
 
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                val fgsType = if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-                } else {
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                var fgsType = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                if (prefsSnapshot.wakeWordEnabled && hasMicPermission()) {
+                    fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
+                if (prefsSnapshot.globalAirGestureEnabled && hasCameraPermission()) {
+                    fgsType = fgsType or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
                 }
                 startForeground(NOTIFICATION_ID, notification, fgsType)
             } else {
@@ -1815,7 +1881,12 @@ class JarvisOverlayService : Service() {
             prefsRepo.setFloatingBubbleEnabled(false)
             val updated = prefsRepo.preferences.first()
             prefsSnapshot = updated
-            if (!updated.persistentTriggerEnabled && !updated.wakeWordEnabled && overlayView == null) {
+            if (
+                !updated.persistentTriggerEnabled &&
+                !updated.wakeWordEnabled &&
+                !updated.globalAirGestureEnabled &&
+                overlayView == null
+            ) {
                 stopSelf()
             }
         }
@@ -1824,13 +1895,17 @@ class JarvisOverlayService : Service() {
     private fun disableAllOverlayModesCompletely() {
         autoCloseJob?.cancel()
         visualCueResetJob?.cancel()
+        globalGestureFlashJob?.cancel()
+        globalMoodResetJob?.cancel()
         voiceManager.stopListening()
         stopOverlayNewsResources()
+        stopGlobalAirGestureResources()
         webDownloadAgent.cancelOrDismiss()
         wakeWordManager.stop()
         removeAllOverlayWindows()
         serviceScope.launch {
             prefsRepo.disableAllOverlayModes()
+            prefsRepo.setGlobalAirGestureEnabled(false)
             stopSelf()
         }
     }
@@ -1859,7 +1934,8 @@ class JarvisOverlayService : Service() {
 
         if (!Settings.canDrawOverlays(this) &&
             !prefsSnapshot.persistentTriggerEnabled &&
-            !prefsSnapshot.wakeWordEnabled
+            !prefsSnapshot.wakeWordEnabled &&
+            !prefsSnapshot.globalAirGestureEnabled
         ) {
             stopSelf()
         }
@@ -1879,7 +1955,8 @@ class JarvisOverlayService : Service() {
         if (
             !prefsSnapshot.floatingBubbleEnabled &&
             !prefsSnapshot.persistentTriggerEnabled &&
-            !prefsSnapshot.wakeWordEnabled
+            !prefsSnapshot.wakeWordEnabled &&
+            !prefsSnapshot.globalAirGestureEnabled
         ) {
             stopSelf()
         }
@@ -2126,6 +2203,7 @@ class JarvisOverlayService : Service() {
         removeCrosshairWindows()
         removeLabelDialog()
         removeProactiveAlertWindow()
+        removeAirGestureHudWindow()
     }
 
     private fun showProactiveAlertWindow(alertId: Long) {
@@ -2275,11 +2353,239 @@ class JarvisOverlayService : Service() {
         proactiveAlertLifecycle = null
     }
 
+    // ---- GLOBAL AIR GESTURE SCROLL & NAVIGATION ----
+
+    private fun syncGlobalAirGestureState(
+        prefs: JarvisPreferences,
+        foregroundPackage: String?,
+        newsOwnsCamera: Boolean,
+    ) {
+        if (!prefs.globalAirGestureEnabled) {
+            stopGlobalAirGestureResources()
+            removeAirGestureHudWindow()
+            val resetState = GlobalAirGestureHudState()
+            _globalAirGestureHudState.value = resetState
+            overlayState.value = overlayState.value.copy(globalAirGestureState = resetState)
+            return
+        }
+
+        val hasCamera = hasCameraPermission()
+        val inVideoFeed = JarvisAccessibilityService.isVideoFeedPackage(foregroundPackage)
+        val waitingForVideoApp = prefs.globalAirGestureScope == AirGestureScope.VIDEO_FEEDS_ONLY && !inVideoFeed
+        val canStartCamera = hasCamera && !newsOwnsCamera && !waitingForVideoApp
+
+        if (Settings.canDrawOverlays(this) && crosshairReticleView == null && labelDialogView == null) {
+            showAirGestureHudWindow()
+        }
+
+        if (canStartCamera) {
+            ensureForegroundNotification()
+            val owner = globalCameraLifecycle ?: OverlayLifecycleOwner().apply { onCreate() }.also {
+                globalCameraLifecycle = it
+            }
+            if (globalAirGestureController?.isRunning() != true) {
+                globalAirGestureController?.start(owner)
+            }
+            val cur = _globalAirGestureHudState.value
+            val updated = cur.copy(
+                isEnabled = true,
+                isWaitingForVideoApp = false,
+                statusLabel = when {
+                    cur.isHandTracked -> "HAND TRACKED // READY"
+                    cur.isCameraActive -> "AIR GESTURE // HAZIR"
+                    else -> "EL SENSÖRÜ // HAZIRLANIYOR"
+                },
+            )
+            _globalAirGestureHudState.value = updated
+            overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
+        } else {
+            globalAirGestureController?.stop(silent = true)
+            val statusLabel = when {
+                !hasCamera -> "Kamera izni gerekli"
+                newsOwnsCamera -> "HABER MODU // AKTİF"
+                waitingForVideoApp -> "VİDEO BEKLENİYOR"
+                else -> "EL KONTROLÜ // BEKLEMEDE"
+            }
+            val updated = _globalAirGestureHudState.value.copy(
+                isEnabled = true,
+                isCameraActive = false,
+                isWaitingForVideoApp = waitingForVideoApp,
+                isHandTracked = false,
+                statusLabel = statusLabel,
+            )
+            _globalAirGestureHudState.value = updated
+            overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
+        }
+    }
+
+    private fun handleGlobalAirGesture(direction: GlobalAirGestureDirection) {
+        val service = JarvisAccessibilityService.getInstance()
+        if (service == null) {
+            flashGlobalAirGestureLabel("ERİŞİLEBİLİRLİK KAPALI")
+            return
+        }
+
+        serviceScope.launch {
+            val horizontalMode = prefsSnapshot.globalAirGestureHorizontalAction
+            val (label, ok) = when (direction) {
+                GlobalAirGestureDirection.SWIPE_UP -> {
+                    "↑ NEXT // SCROLL UP" to service.dispatchSwipe(SwipeDirection.NEXT_UP)
+                }
+                GlobalAirGestureDirection.SWIPE_DOWN -> {
+                    "↓ PREV // SCROLL DOWN" to service.dispatchSwipe(SwipeDirection.PREV_DOWN)
+                }
+                GlobalAirGestureDirection.SWIPE_LEFT -> {
+                    if (horizontalMode == AirGestureHorizontalAction.BACK_NEXT) {
+                        "← BACK // GERİ" to service.dispatchBackAction()
+                    } else {
+                        "← SWIPE // SOL" to service.dispatchSwipe(SwipeDirection.LEFT)
+                    }
+                }
+                GlobalAirGestureDirection.SWIPE_RIGHT -> {
+                    "→ SWIPE // SAĞ" to service.dispatchSwipe(SwipeDirection.RIGHT)
+                }
+            }
+
+            if (ok) {
+                flashGlobalAirGestureLabel(label, incrementPulse = true)
+                triggerNebulaGesturePulse()
+            } else {
+                flashGlobalAirGestureLabel("KAYDIRMA İPTAL EDİLDİ")
+            }
+        }
+    }
+
+    private fun flashGlobalAirGestureLabel(
+        label: String,
+        incrementPulse: Boolean = false,
+    ) {
+        val cur = _globalAirGestureHudState.value
+        val updated = cur.copy(
+            lastActionLabel = label,
+            lastActionTimestampMs = System.currentTimeMillis(),
+            triggerCount = if (incrementPulse) cur.triggerCount + 1L else cur.triggerCount,
+        )
+        _globalAirGestureHudState.value = updated
+        overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
+
+        globalGestureFlashJob?.cancel()
+        globalGestureFlashJob = serviceScope.launch {
+            delay(1_350L)
+            val latest = _globalAirGestureHudState.value
+            if (latest.lastActionLabel == label) {
+                val cleared = latest.copy(lastActionLabel = "")
+                _globalAirGestureHudState.value = cleared
+                overlayState.value = overlayState.value.copy(globalAirGestureState = cleared)
+            }
+        }
+    }
+
+    private fun triggerNebulaGesturePulse() {
+        val previousMood = bubbleMoodState.value
+        bubbleMoodState.value = JarvisMood.ENERGETIC
+        if (overlayView != null && !overlayState.value.isProcessing) {
+            overlayState.value = overlayState.value.copy(mood = JarvisMood.ENERGETIC)
+        }
+        globalMoodResetJob?.cancel()
+        globalMoodResetJob = serviceScope.launch {
+            delay(950L)
+            if (bubbleMoodState.value == JarvisMood.ENERGETIC) {
+                bubbleMoodState.value = if (previousMood == JarvisMood.ENERGETIC) JarvisMood.NEUTRAL else previousMood
+            }
+            if (overlayView != null && !overlayState.value.isProcessing && overlayState.value.mood == JarvisMood.ENERGETIC) {
+                overlayState.value = overlayState.value.copy(mood = JarvisMood.NEUTRAL)
+            }
+        }
+    }
+
+    private fun showAirGestureHudWindow() {
+        if (airGestureHudView != null || !Settings.canDrawOverlays(this)) return
+        val owner = OverlayLifecycleOwner().apply { onCreate() }
+        airGestureHudLifecycle = owner
+
+        val density = resources.displayMetrics.density
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            overlayLayoutType(),
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+            gravity = Gravity.TOP or Gravity.END
+            x = (12 * density).roundToInt()
+            y = (44 * density).roundToInt()
+        }
+
+        val view = ComposeView(this).apply {
+            setViewTreeLifecycleOwner(owner)
+            setViewTreeSavedStateRegistryOwner(owner)
+            setViewTreeViewModelStoreOwner(owner)
+            setContent {
+                val hudState by globalAirGestureHudState.collectAsStateWithLifecycle()
+                JarvisTheme(darkTheme = true) {
+                    GlobalAirGestureHudPill(
+                        state = hudState,
+                        onCloseClick = {
+                            serviceScope.launch {
+                                prefsRepo.setGlobalAirGestureEnabled(false)
+                                stopGlobalAirGestureResources()
+                                removeAirGestureHudWindow()
+                                val updated = prefsRepo.preferences.first()
+                                prefsSnapshot = updated
+                                ensureForegroundNotification()
+                                if (
+                                    !updated.floatingBubbleEnabled &&
+                                    !updated.persistentTriggerEnabled &&
+                                    !updated.wakeWordEnabled &&
+                                    overlayView == null
+                                ) {
+                                    stopSelf()
+                                }
+                            }
+                        },
+                    )
+                }
+            }
+        }
+
+        airGestureHudView = view
+        try {
+            windowManager.addView(view, params)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to attach global air gesture HUD", e)
+            removeAirGestureHudWindow()
+        }
+    }
+
+    private fun removeAirGestureHudWindow() {
+        airGestureHudView?.let { v ->
+            try {
+                windowManager.removeView(v)
+            } catch (_: Exception) {
+            }
+        }
+        airGestureHudView = null
+        airGestureHudLifecycle?.onDestroy()
+        airGestureHudLifecycle = null
+    }
+
+    private fun stopGlobalAirGestureResources() {
+        globalGestureFlashJob?.cancel()
+        globalGestureFlashJob = null
+        globalMoodResetJob?.cancel()
+        globalMoodResetJob = null
+        globalAirGestureController?.stop()
+        globalCameraLifecycle?.onDestroy()
+        globalCameraLifecycle = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         autoCloseJob?.cancel()
         visualCueResetJob?.cancel()
         stopOverlayNewsResources()
+        stopGlobalAirGestureResources()
         webDownloadAgent.cancelOrDismiss()
         wakeWordManager.stop()
         voiceManager.destroy()
@@ -2294,6 +2600,16 @@ class JarvisOverlayService : Service() {
     companion object {
         private const val CHANNEL_ID = "jarvis_overlay_channel"
         private const val NOTIFICATION_ID = 7001
+
+        private val _globalAirGestureHudState = MutableStateFlow(GlobalAirGestureHudState())
+        val globalAirGestureHudState: StateFlow<GlobalAirGestureHudState> =
+            _globalAirGestureHudState.asStateFlow()
+
+        private val isNewsModeOwningCamera = MutableStateFlow(false)
+
+        fun setNewsModeCameraBusy(busy: Boolean) {
+            isNewsModeOwningCamera.value = busy
+        }
 
         const val ACTION_SHOW_OVERLAY = "com.example.action.SHOW_OVERLAY"
         const val ACTION_START_CROSSHAIR = "com.example.action.START_CROSSHAIR"
@@ -2461,10 +2777,20 @@ private fun OverlayCardContent(
         }
     }
 
+    var gesturePulseRms by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(state.globalAirGestureState.triggerCount) {
+        if (state.globalAirGestureState.triggerCount > 0L) {
+            gesturePulseRms = 0.56f
+            delay(420L)
+            gesturePulseRms = 0f
+        }
+    }
+
     val effectiveRms = when {
         state.isListening -> state.rmsLevel
         state.isSpeaking -> ttsCadenceRms
         state.isProcessing -> 0.18f
+        gesturePulseRms > 0f -> gesturePulseRms
         else -> 0f
     }
 
