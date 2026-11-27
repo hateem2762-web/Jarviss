@@ -341,7 +341,7 @@ object ScheduledMessageParser {
             ?: return emptyList()
 
         val cleaned = segment
-            .replace(Regex("""['’](?:lara|lere|larına|lerine)\b""", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("""['’](?:a|e|ya|ye|na|ne|lara|lere|larına|lerine)\b""", RegexOption.IGNORE_CASE), "")
             .replace(Regex("""\b(?:kişilere|kişilerine|kişisine|kisilere|kisilerine|kisisine|şu|su|hemen|şimdi|simdi|mesajlara|mesajları|mesajlar)\b""", RegexOption.IGNORE_CASE), " ")
             .replace(Regex("""\b\d{1,3}\s*(?:dakika|dk|saat)\s*sonra\b""", RegexOption.IGNORE_CASE), " ")
             .replace(Regex("""\b(?:saat\s+)?\d{1,2}[:.]\d{2}(?:['’]?(?:da|de|ta|te|dan|den|tan|ten)\s*sonra)?\b""", RegexOption.IGNORE_CASE), " ")
@@ -351,7 +351,7 @@ object ScheduledMessageParser {
             .map { token ->
                 token.trim()
                     .replace(Regex("""^(?:kişilere|kisilere|hemen|şimdi|simdi)\s+""", RegexOption.IGNORE_CASE), "")
-                    .replace(Regex("""['’]?(?:ye|ya|e|a)$""", RegexOption.IGNORE_CASE), "")
+                    .replace(Regex("""['’](?:ye|ya|e|a|ne|na)$""", RegexOption.IGNORE_CASE), "")
                     .trim('.', ',', ':', ';', ' ')
             }
             .filter {

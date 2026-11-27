@@ -133,8 +133,6 @@ import com.example.model.ActionExecutionStatus
 import com.example.model.ActionIntent
 import com.example.model.AirGestureHorizontalAction
 import com.example.model.AirGestureScope
-import com.example.model.AirGestureSensitivity
-import com.example.model.AirGestureTwoFingerAction
 import com.example.model.HudTopicResolver
 import com.example.model.InstalledAppInfo
 import com.example.model.JarvisMood
@@ -276,6 +274,7 @@ class JarvisOverlayService : Service() {
     private var globalAirGestureController: GlobalAirGestureController? = null
     private var globalGestureFlashJob: Job? = null
     private var globalMoodResetJob: Job? = null
+    private var isMediaPaused: Boolean = false
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -363,31 +362,28 @@ class JarvisOverlayService : Service() {
             onGesture = { dir -> handleGlobalAirGesture(dir) },
             onTrackingChanged = { cameraActive, handTracked, posture, errorStatus ->
                 val cur = _globalAirGestureHudState.value
-                val postureBadge = when (posture) {
-                    HandPosture.PINCH -> "PINCH // DURAKLAT"
-                    HandPosture.TWO_FINGER_VICTORY -> "BEĞEN // ✌️"
-                    HandPosture.FIST -> "YUMRUK // BEKLEMEDE"
-                    else -> ""
-                }
                 val nextLabel = when {
                     errorStatus != null -> errorStatus
                     !cameraActive && cur.isWaitingForVideoApp -> "VİDEO BEKLENİYOR"
                     !cameraActive -> "EL KONTROLÜ // BEKLEMEDE"
-                    postureBadge.isNotBlank() -> postureBadge
-                    handTracked -> "EL ALGILANDI // HAZIR"
+                    handTracked -> "EL ALGILANDI"
                     else -> "EL KONTROLÜ // HAZIR"
+                }
+                val postureBadge = when (posture) {
+                    HandPosture.PINCH -> "⏸ DURAKLATILDI"
+                    HandPosture.TWO_FINGER_VICTORY -> "♥ BEĞENİLDİ"
+                    else -> ""
                 }
                 val updated = cur.copy(
                     isCameraActive = cameraActive,
                     isHandTracked = handTracked,
-                    activePostureBadge = postureBadge,
                     statusLabel = nextLabel,
+                    activePostureBadge = postureBadge,
                 )
                 _globalAirGestureHudState.value = updated
                 overlayState.value = overlayState.value.copy(globalAirGestureState = updated)
             },
         )
-        globalAirGestureController?.updateSensitivity(prefsSnapshot.globalAirGestureSensitivity)
 
         serviceScope.launch {
             combine(
@@ -2441,37 +2437,28 @@ class JarvisOverlayService : Service() {
             val horizontalMode = prefsSnapshot.globalAirGestureHorizontalAction
             val (label, ok) = when (direction) {
                 GlobalAirGestureDirection.SWIPE_UP -> {
-                    "↑ NEXT // SCROLL UP" to service.dispatchSwipe(SwipeDirection.NEXT_UP)
+                    "↑" to service.dispatchSwipe(SwipeDirection.NEXT_UP)
                 }
                 GlobalAirGestureDirection.SWIPE_DOWN -> {
-                    "↓ PREV // SCROLL DOWN" to service.dispatchSwipe(SwipeDirection.PREV_DOWN)
+                    "↓" to service.dispatchSwipe(SwipeDirection.PREV_DOWN)
                 }
                 GlobalAirGestureDirection.SWIPE_LEFT -> {
                     if (horizontalMode == AirGestureHorizontalAction.BACK_NEXT) {
-                        "← BACK // GERİ" to service.dispatchBackAction()
+                        "← GERİ" to service.dispatchBackAction()
                     } else {
-                        "← SWIPE // SOL" to service.dispatchSwipe(SwipeDirection.LEFT)
+                        "← SOL" to service.dispatchSwipe(SwipeDirection.LEFT)
                     }
                 }
                 GlobalAirGestureDirection.SWIPE_RIGHT -> {
-                    "→ SWIPE // SAĞ" to service.dispatchSwipe(SwipeDirection.RIGHT)
+                    "→ SAĞ" to service.dispatchSwipe(SwipeDirection.RIGHT)
                 }
                 GlobalAirGestureDirection.PINCH -> {
-                    "⏸ PINCH // OYNAT/DURAKLAT" to service.dispatchDoubleTapAtPercent(0.5f, 0.5f)
+                    isMediaPaused = !isMediaPaused
+                    val pauseLabel = if (isMediaPaused) "⏸ DURAKLATILDI" else "▶ DEVAM"
+                    pauseLabel to service.dispatchTapAtPercent(0.5f, 0.48f)
                 }
                 GlobalAirGestureDirection.TWO_FINGER_VICTORY -> {
-                    val twoFingerAction = prefsSnapshot.globalAirGestureTwoFingerAction
-                    when (twoFingerAction) {
-                        AirGestureTwoFingerAction.DOUBLE_TAP_LIKE -> {
-                            "❤️ BEĞEN // ÇİFT TIK" to service.dispatchDoubleTabAtPercentSafe()
-                        }
-                        AirGestureTwoFingerAction.PLAY_PAUSE -> {
-                            "⏯ OYNAT // DURAKLAT" to service.dispatchDoubleTapAtPercent(0.5f, 0.5f)
-                        }
-                        AirGestureTwoFingerAction.BACK -> {
-                            "↩ GERİ // GİT" to service.dispatchBackAction()
-                        }
-                    }
+                    "♥ BEĞENİLDİ" to service.dispatchDoubleTapAtPercent(0.5f, 0.48f)
                 }
             }
 
@@ -2479,7 +2466,7 @@ class JarvisOverlayService : Service() {
                 flashGlobalAirGestureLabel(label, incrementPulse = true)
                 triggerNebulaGesturePulse()
             } else {
-                flashGlobalAirGestureLabel("KAYDIRMA İPTAL EDİLDİ")
+                flashGlobalAirGestureLabel("EYLEM İPTAL")
             }
         }
     }

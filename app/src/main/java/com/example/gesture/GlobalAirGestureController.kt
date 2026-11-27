@@ -84,9 +84,8 @@ data class GlobalAirGestureHudState(
 )
 
 /**
- * Rotation- and palm/back-invariant 21-landmark posture classifier.
- * Uses Euclidean ratios from the wrist (0) to PIPs and fingertips so the user
- * does NOT have to awkwardly force a flat open palm straight toward the lens.
+ * Robust 21-landmark posture classifier with distance-normalized pinch ratio (`handScale`).
+ * Does not require rigid palm-flat poses; works from any angle.
  */
 object HandPostureClassifier {
 
@@ -106,11 +105,11 @@ object HandPostureClassifier {
         fun dist(a: HandLandmarkPoint, b: HandLandmarkPoint): Float = hypot(a.x - b.x, a.y - b.y)
 
         fun isExtended(tipIdx: Int, pipIdx: Int): Boolean {
-            return dist(wrist, landmarks[tipIdx]) > dist(wrist, landmarks[pipIdx]) * 1.12f
+            return dist(wrist, landmarks[tipIdx]) > dist(wrist, landmarks[pipIdx]) * 1.10f
         }
 
         fun isFolded(tipIdx: Int, pipIdx: Int): Boolean {
-            return dist(wrist, landmarks[tipIdx]) < dist(wrist, landmarks[pipIdx]) * 1.05f
+            return dist(wrist, landmarks[tipIdx]) < dist(wrist, landmarks[pipIdx]) * 1.08f
         }
 
         val indexExtended = isExtended(8, 6)
@@ -122,30 +121,25 @@ object HandPostureClassifier {
         val middleFolded = isFolded(12, 10)
 
         val thumbIndexDist = dist(thumbTip, indexTip)
-        val thumbMiddleDist = dist(thumbTip, middleTip)
 
-        val isFist = indexFolded && middleFolded && ringFolded && pinkyFolded
-        val isPinch = !isFist &&
-            thumbIndexDist < handScale * 0.36f &&
-            thumbMiddleDist > handScale * 0.42f
+        // Normalized pinch check: thumb tip close to index tip relative to handScale
+        val isPinch = thumbIndexDist < handScale * 0.45f
         val isTwoFinger = !isPinch &&
             indexExtended &&
             middleExtended &&
             ringFolded &&
-            pinkyFolded &&
-            thumbIndexDist > handScale * 0.36f
+            pinkyFolded
 
         val posture = when {
-            isFist -> HandPosture.FIST
             isPinch -> HandPosture.PINCH
             isTwoFinger -> HandPosture.TWO_FINGER_VICTORY
             else -> HandPosture.OPEN_OR_POINTER
         }
 
-        // Track weighted blend of index fingertip and middle MCP for effortless wrist/finger flicks
+        // Anchor point for movement tracking (weighted blend of wrist and middle MCP)
         val anchor = HandLandmarkPoint(
-            x = (1f - (indexTip.x * 0.45f + middleMcp.x * 0.55f)).coerceIn(0f, 1f),
-            y = (indexTip.y * 0.45f + middleMcp.y * 0.55f).coerceIn(0f, 1f),
+            x = (1f - (wrist.x * 0.35f + middleMcp.x * 0.65f)).coerceIn(0f, 1f),
+            y = (wrist.y * 0.35f + middleMcp.y * 0.65f).coerceIn(0f, 1f),
         )
 
         return Triple(posture, handScale, anchor)
@@ -153,18 +147,18 @@ object HandPostureClassifier {
 }
 
 /**
- * Pure Kotlin 6-gesture tracker (4-direction scale-normalized micro-flicks + Pinch + Two-Finger Victory)
- * with Fist Pause/Reset, opposite-direction return-stroke suppression, and hand presence hysteresis.
+ * Pure Kotlin gesture tracker supporting effortless scrolling (any hand posture)
+ * plus Pinch (Pause) and Two-Finger Victory (Like) with 850ms cooldown.
  */
 class GlobalAirGestureTracker(
     private var sensitivity: AirGestureSensitivity = AirGestureSensitivity.EASY,
-    private val sameDirectionCooldownMs: Long = 680L,
-    private val oppositeDirectionGuardMs: Long = 1_280L,
-    private val postureCooldownMs: Long = 1_100L,
-    private val pinchHoldMs: Long = 110L,
-    private val twoFingerHoldMs: Long = 220L,
+    private val sameDirectionCooldownMs: Long = 850L,
+    private val oppositeDirectionGuardMs: Long = 1_100L,
+    private val postureCooldownMs: Long = 850L,
+    private val pinchHoldMs: Long = 100L,
+    private val twoFingerHoldMs: Long = 180L,
     private val maxWindowMs: Long = 480L,
-    private val maxCrossAxisRatio: Float = 0.85f,
+    private val maxCrossAxisRatio: Float = 0.88f,
     private val handHoldMs: Long = 750L,
 ) {
     private data class Sample(
@@ -246,17 +240,7 @@ class GlobalAirGestureTracker(
         lastHandSeenMs = timestampMs
         handTracked = true
 
-        // 1. Fist pauses swiping so user can safely lower or reposition their hand
-        if (posture == HandPosture.FIST) {
-            samples.clear()
-            smoothedX = null
-            smoothedY = null
-            pinchStartMs = -1L
-            twoFingerStartMs = -1L
-            return FrameOutput(gesture = null, isHandTracked = true, posture = HandPosture.FIST)
-        }
-
-        // 2. Pinch posture detection (Play / Pause)
+        // 1. Pinch posture detection (Pause / Play)
         if (posture == HandPosture.PINCH) {
             twoFingerStartMs = -1L
             samples.clear()
@@ -280,7 +264,7 @@ class GlobalAirGestureTracker(
             pinchStartMs = -1L
         }
 
-        // 3. Two-finger Victory posture detection (Like / Double-Tap or configurable)
+        // 2. Two-finger Victory posture detection (Like)
         if (posture == HandPosture.TWO_FINGER_VICTORY) {
             if (twoFingerStartMs < 0L) {
                 twoFingerStartMs = timestampMs
@@ -298,13 +282,14 @@ class GlobalAirGestureTracker(
                     posture = HandPosture.TWO_FINGER_VICTORY,
                 )
             }
+            return FrameOutput(gesture = null, isHandTracked = true, posture = HandPosture.TWO_FINGER_VICTORY)
         } else {
             twoFingerStartMs = -1L
         }
 
-        // 4. EMA smoothing + scale-normalized micro-flick swipe tracking
-        val sx = smoothedX?.let { it * 0.35f + userSpaceX * 0.65f } ?: userSpaceX
-        val sy = smoothedY?.let { it * 0.35f + y * 0.65f } ?: y
+        // 3. Scale-normalized micro-flick swipe tracking (works for any hand pose without open palm constraint)
+        val sx = smoothedX?.let { it * 0.40f + userSpaceX * 0.60f } ?: userSpaceX
+        val sy = smoothedY?.let { it * 0.40f + y * 0.60f } ?: y
         smoothedX = sx
         smoothedY = sy
 
@@ -317,7 +302,7 @@ class GlobalAirGestureTracker(
             samples.removeFirst()
         }
 
-        if (samples.size < 2 || timestampMs - lastSwipeTriggerMs < sameDirectionCooldownMs) {
+        if (samples.size < 3 || timestampMs - lastSwipeTriggerMs < sameDirectionCooldownMs) {
             return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
         }
 
@@ -338,12 +323,12 @@ class GlobalAirGestureTracker(
             else -> null
         } ?: return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
 
-        // Return-stroke suppression: avoid accidental reverse scroll when relaxing hand back down
+        // Return-stroke suppression
         val isOpposite = lastSwipeDirection != null && areOpposite(lastSwipeDirection!!, candidate)
         if (isOpposite && timestampMs - lastSwipeTriggerMs < oppositeDirectionGuardMs) {
             val primaryDisp = if (candidate == GlobalAirGestureDirection.SWIPE_UP || candidate == GlobalAirGestureDirection.SWIPE_DOWN) absDy else absDx
             val primaryThresh = if (candidate == GlobalAirGestureDirection.SWIPE_UP || candidate == GlobalAirGestureDirection.SWIPE_DOWN) minDy else minDx
-            if (primaryDisp < primaryThresh * 1.9f) {
+            if (primaryDisp < primaryThresh * 1.8f) {
                 return FrameOutput(gesture = null, isHandTracked = true, posture = posture)
             }
         }
@@ -358,18 +343,18 @@ class GlobalAirGestureTracker(
         val scale = handScale.coerceIn(0.06f, 0.42f)
         return when (sensitivity) {
             AirGestureSensitivity.EASY -> {
-                val dy = (scale * 0.54f).coerceIn(0.065f, 0.14f)
-                val dx = (scale * 0.68f).coerceIn(0.085f, 0.175f)
+                val dy = (scale * 0.48f).coerceIn(0.055f, 0.125f)
+                val dx = (scale * 0.62f).coerceIn(0.075f, 0.16f)
                 dy to dx
             }
             AirGestureSensitivity.BALANCED -> {
-                val dy = (scale * 0.78f).coerceIn(0.09f, 0.175f)
-                val dx = (scale * 0.94f).coerceIn(0.11f, 0.205f)
+                val dy = (scale * 0.70f).coerceIn(0.08f, 0.155f)
+                val dx = (scale * 0.85f).coerceIn(0.10f, 0.19f)
                 dy to dx
             }
             AirGestureSensitivity.PRECISE -> {
-                val dy = (scale * 1.05f).coerceIn(0.12f, 0.22f)
-                val dx = (scale * 1.22f).coerceIn(0.145f, 0.25f)
+                val dy = (scale * 0.95f).coerceIn(0.11f, 0.20f)
+                val dx = (scale * 1.12f).coerceIn(0.13f, 0.23f)
                 dy to dx
             }
         }
@@ -555,14 +540,13 @@ class GlobalAirGestureController(
             .setModelAssetBuffer(modelBuffer)
             .build()
 
-        // Relaxed confidence thresholds so angled hands, finger-only gestures, or back-of-hand track smoothly
         val options = HandLandmarker.HandLandmarkerOptions.builder()
             .setBaseOptions(baseOptions)
             .setRunningMode(RunningMode.LIVE_STREAM)
             .setNumHands(1)
-            .setMinHandDetectionConfidence(0.36f)
-            .setMinHandPresenceConfidence(0.36f)
-            .setMinTrackingConfidence(0.32f)
+            .setMinHandDetectionConfidence(0.32f)
+            .setMinHandPresenceConfidence(0.32f)
+            .setMinTrackingConfidence(0.30f)
             .setResultListener { result, _ ->
                 handleLandmarksResult(result)
             }
@@ -631,9 +615,8 @@ class GlobalAirGestureController(
             return
         }
 
-        // Adaptive FPS throttling: ~7 FPS idle (battery/thermal friendly), ~24 FPS while hand tracked
         val nowMs = SystemClock.uptimeMillis()
-        val minIntervalMs = if (lastReportedHandTracked) 42L else 135L
+        val minIntervalMs = if (lastReportedHandTracked) 42L else 130L
         if (nowMs - lastFrameAnalyzedMs < minIntervalMs) {
             imageProxy.close()
             return
