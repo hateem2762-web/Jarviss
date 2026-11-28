@@ -230,6 +230,38 @@ internal fun DrawScope.drawVisualCueVector(
     val bright = Color(0xFFF1F5F9)
 
     when (cueKey) {
+        "email_inbox" -> {
+            val w = u * 1.68f
+            val h = u * 1.12f
+            val left = cx - w / 2f
+            val top = cy - h / 2f
+            drawRoundRect(
+                color = accent.copy(alpha = 0.16f),
+                topLeft = Offset(left, top),
+                size = Size(w, h),
+                cornerRadius = CornerRadius(10f, 10f),
+            )
+            drawRoundRect(
+                color = accent,
+                topLeft = Offset(left, top),
+                size = Size(w, h),
+                cornerRadius = CornerRadius(10f, 10f),
+                style = stroke,
+            )
+            val flap = Path().apply {
+                moveTo(left + 4f, top + 6f)
+                lineTo(cx, cy + h * 0.10f)
+                lineTo(left + w - 4f, top + 6f)
+            }
+            drawPath(flap, color = bright, style = stroke)
+            // Unread pulse dot on corner
+            drawCircle(
+                color = Color(0xFFEF4444),
+                radius = 5.5f + 1.5f * pulse,
+                center = Offset(left + w - 4f, top + 4f),
+            )
+        }
+
         "eagle_crest" -> {
             // Stylized geometric wings + crest shield
             val wingPath = Path().apply {

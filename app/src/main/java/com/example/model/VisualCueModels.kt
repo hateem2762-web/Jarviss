@@ -10,6 +10,8 @@ data class VisualCueItem(
 object VisualCueResolver {
 
     private val KEYWORD_CUES: List<Pair<List<String>, VisualCueItem>> = listOf(
+        listOf("gmail", "e-posta", "eposta", "mail", "gelen kutusu", "outlook") to
+            VisualCueItem("email_inbox", "GMAIL // E-POSTA"),
         listOf("besiktas", "beşiktaş", "kartal", "siyah beyaz", "bjk") to
             VisualCueItem("eagle_crest", "BEŞİKTAŞ // KARTAL"),
         listOf("stadyum", "stat", "saha", "tribun", "tribün", "arena", "vodafone", "tupras", "tüpraş") to
@@ -57,6 +59,7 @@ object VisualCueResolver {
     )
 
     private val CANONICAL_LABELS = mapOf(
+        "email_inbox" to "GMAIL // E-POSTA",
         "eagle_crest" to "BEŞİKTAŞ // KARTAL",
         "stadium" to "STADYUM // SAHA",
         "fist_impact" to "GERİLİM // OLAY",
@@ -124,7 +127,7 @@ object VisualCueResolver {
         if (result.isEmpty() && actionIntent != null) {
             val fallback = when (actionIntent) {
                 ActionIntent.WEB_DOWNLOAD_AGENT -> VisualCueItem("download_file", "DOSYA // İNDİRME")
-                ActionIntent.SCHEDULE_MESSAGE -> VisualCueItem("message_send", "MESAJ // İLETİM")
+                ActionIntent.SEND_MESSAGE -> VisualCueItem("message_send", "MESAJ // İLETİM")
                 ActionIntent.SET_REMINDER -> VisualCueItem("timer_clock", "ZAMANLAYICI")
                 ActionIntent.CAPTURE_SCREEN_NOTE -> VisualCueItem("note_scroll", "ARŞİV // NOT")
                 ActionIntent.TORCH_CONTROL -> VisualCueItem("flashlight_beam", "DONANIM // FENER")
